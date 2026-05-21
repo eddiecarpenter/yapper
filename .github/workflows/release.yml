@@ -1,0 +1,12 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  release:
+    uses: eddiecarpenter/gh-agentic/.github/workflows/release.yml@v2.8.6
+    secrets: inherit
+    permissions:
+      contents: write
