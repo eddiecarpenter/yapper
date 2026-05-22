@@ -6,7 +6,7 @@ on:
 
 jobs:
   release:
-    uses: eddiecarpenter/gh-agentic/.github/workflows/release.yml@v2.8.6
+    uses: eddiecarpenter/gh-agentic/.github/workflows/release.yml@v2.8.7
     secrets: inherit
     permissions:
       contents: write
