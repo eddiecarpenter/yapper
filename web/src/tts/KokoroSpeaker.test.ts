@@ -4,13 +4,16 @@
  * Coverage layers across the feature's four tasks:
  *   - Task 1: backend-selection branches and the canonical
  *     provider log line. Does not touch the Kokoro pipeline.
- *   - Task 2 (this layer): lazy model loading + loading-state
- *     observable + load-error classification. The Transformers.js
- *     `pipeline` factory is mocked at the module boundary via
- *     `vi.mock` so tests do not download ~80 MB of model weights and
- *     do not depend on a browser environment that supports ONNX Web
- *     inference.
- *   - Task 3 will add the AC-1 / AC-3 synthesis + playback fixture.
+ *   - Task 2: lazy model loading + loading-state observable +
+ *     load-error classification. The Transformers.js `pipeline`
+ *     factory is mocked at the module boundary via `vi.mock` so
+ *     tests do not download ~80 MB of model weights and do not depend
+ *     on a browser environment that supports ONNX Web inference.
+ *   - Task 3 (this layer): synthesis + Web Audio playback +
+ *     voice option (AC-1, AC-3). jsdom does not implement the Web
+ *     Audio API, so an `AudioContext` stub is installed on
+ *     `globalThis` before each test and the buffer-source's
+ *     `onended` event is driven manually where timing matters.
  *   - Task 4 will add cancel + dispose lifecycle coverage.
  *
  * jsdom does not expose `navigator.gpu`, so the WASM branch is the
@@ -39,7 +42,12 @@ vi.mock("@huggingface/transformers", () => ({
   pipeline: mocks.pipeline,
 }));
 
-import { KOKORO_MODEL_ID, KokoroSpeaker } from "./KokoroSpeaker";
+import {
+  DEFAULT_VOICE,
+  KOKORO_MODEL_ID,
+  KokoroSpeaker,
+  extractSynthesisOutput,
+} from "./KokoroSpeaker";
 import type { LoadingState } from "./KokoroSpeaker";
 
 /**
@@ -54,16 +62,15 @@ const GPU_SENTINEL: GpuLike = Object.freeze({});
 
 /**
  * Minimal stand-in for the real TTS pipeline object: callable and
- * disposable. Task 1/2 tests don't invoke the call path (the
- * loading-state machinery resolves without inspecting the output);
- * Task 3 tests do invoke it, so we accept an optional `output`
- * override that the production reducer will see verbatim. The
- * `calls` array captures every (text, options) pair passed in, so
- * Task 3 tests can assert the voice plumbing.
+ * disposable. The callable accepts `(text, options)` and returns a
+ * shape that matches Transformers.js v3's `TextToAudioOutput`
+ * (`{ audio: Float32Array, sampling_rate: number }`). The `calls`
+ * array captures every (text, options) tuple so Task 3 tests can
+ * assert voice plumbing.
  */
 function makeFakePipeline(
   output: unknown = {
-    audio: new Float32Array(0),
+    audio: new Float32Array(240), // 10 ms at 24 kHz — non-empty, valid buffer
     sampling_rate: 24000,
   },
 ): {
@@ -84,6 +91,125 @@ function makeFakePipeline(
   };
   fn.dispose = dispose;
   return { pipeline: fn, dispose, calls };
+}
+
+/**
+ * AudioContext / AudioBufferSourceNode / AudioBuffer stubs.
+ *
+ * jsdom does not implement the Web Audio API, so these mocks stand in
+ * for the real implementation. The default behaviour is "auto-fire
+ * `onended` on the next microtask after `start()`" — most tests do
+ * not care about timing and want playback to settle naturally. For
+ * the AC-1 timing test we override that behaviour via
+ * `autoEnd: false` so the test can drive `onended` manually.
+ */
+type FakeSource = {
+  buffer: FakeBuffer | null;
+  onended: (() => void) | null;
+  started: boolean;
+  stopped: boolean;
+  connect: ReturnType<typeof vi.fn>;
+  start: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+};
+
+type FakeBuffer = {
+  numberOfChannels: number;
+  length: number;
+  sampleRate: number;
+  duration: number;
+  copyToChannel: ReturnType<typeof vi.fn>;
+  channels: Float32Array[];
+};
+
+type FakeContextState = {
+  contexts: FakeContext[];
+  sources: FakeSource[];
+  buffers: FakeBuffer[];
+  /** When false, source.start() does NOT auto-fire onended. */
+  autoEnd: boolean;
+};
+
+type FakeContext = {
+  destination: object;
+  close: ReturnType<typeof vi.fn>;
+  createBuffer: ReturnType<typeof vi.fn>;
+  createBufferSource: ReturnType<typeof vi.fn>;
+};
+
+function installAudioContext(): FakeContextState {
+  const state: FakeContextState = {
+    contexts: [],
+    sources: [],
+    buffers: [],
+    autoEnd: true,
+  };
+
+  function makeBuffer(numberOfChannels: number, length: number, sampleRate: number): FakeBuffer {
+    const channels: Float32Array[] = [];
+    for (let i = 0; i < numberOfChannels; i++) {
+      channels.push(new Float32Array(length));
+    }
+    const buffer: FakeBuffer = {
+      numberOfChannels,
+      length,
+      sampleRate,
+      duration: length / sampleRate,
+      channels,
+      copyToChannel: vi.fn((data: Float32Array, channel: number) => {
+        channels[channel]?.set(data);
+      }),
+    };
+    state.buffers.push(buffer);
+    return buffer;
+  }
+
+  function makeSource(): FakeSource {
+    const source: FakeSource = {
+      buffer: null,
+      onended: null,
+      started: false,
+      stopped: false,
+      connect: vi.fn(),
+      start: vi.fn(() => {
+        source.started = true;
+        if (state.autoEnd) {
+          // Fire onended on the next microtask so the awaiting code in
+          // speak() has a chance to attach the handler before it
+          // resolves — the real Web Audio path is also asynchronous.
+          queueMicrotask(() => {
+            if (!source.stopped && source.onended) {
+              source.onended();
+            }
+          });
+        }
+      }),
+      stop: vi.fn(() => {
+        source.stopped = true;
+        if (source.onended) {
+          source.onended();
+        }
+      }),
+    };
+    state.sources.push(source);
+    return source;
+  }
+
+  class MockAudioContext {
+    destination = {};
+    close = vi.fn().mockResolvedValue(undefined);
+    createBuffer = vi.fn((numberOfChannels: number, length: number, sampleRate: number) =>
+      makeBuffer(numberOfChannels, length, sampleRate),
+    );
+    createBufferSource = vi.fn(() => makeSource());
+
+    constructor() {
+      state.contexts.push(this as unknown as FakeContext);
+    }
+  }
+
+  vi.stubGlobal("AudioContext", MockAudioContext);
+  return state;
 }
 
 describe("KokoroSpeaker — backend selection", () => {
@@ -148,7 +274,7 @@ describe("KokoroSpeaker — backend selection", () => {
     expect(logSpy).toHaveBeenNthCalledWith(2, "provider: webgpu");
   });
 
-  it("cancel() and dispose() Task-1/2 stubs do not throw", () => {
+  it("cancel() and dispose() Task-1/2/3 stubs do not throw", () => {
     const s = new KokoroSpeaker();
     expect(() => s.cancel()).not.toThrow();
     expect(() => s.dispose()).not.toThrow();
@@ -160,6 +286,11 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     // Silence the provider log; this block does not assert on it.
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     mocks.pipeline.mockReset();
+    installAudioContext();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("starts in the 'idle' state with no pipeline construction attempted", () => {
@@ -179,10 +310,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     const seen: LoadingState[] = [];
     s.subscribe((st) => seen.push(st));
 
-    // Task-2 speak() throws "not yet implemented" AFTER the load
-    // succeeds — swallow the throw so we can assert the state
-    // transitions, which is the actual Task-2 behaviour under test.
-    await expect(s.speak("hello")).rejects.toThrow(/not yet implemented/);
+    await s.speak("hello");
 
     expect(seen).toEqual(["loading", "ready"]);
     expect(s.getLoadingState()).toBe("ready");
@@ -193,7 +321,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
     const s = new KokoroSpeaker();
-    await expect(s.speak("hi")).rejects.toThrow(/not yet implemented/);
+    await s.speak("hi");
 
     // Argument tuple matches the Transformers.js pipeline signature:
     // (task, modelId, options) — verifying it pins both AD-10 (the
@@ -209,13 +337,13 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
     const s = new KokoroSpeaker();
-    await expect(s.speak("a")).rejects.toThrow(/not yet implemented/);
+    await s.speak("a");
     const stateAfterFirst = s.getLoadingState();
     const seen: LoadingState[] = [];
     s.subscribe((st) => seen.push(st));
 
-    await expect(s.speak("b")).rejects.toThrow(/not yet implemented/);
-    await expect(s.speak("c")).rejects.toThrow(/not yet implemented/);
+    await s.speak("b");
+    await s.speak("c");
 
     // Three calls in total; pipeline factory invoked only once.
     expect(mocks.pipeline).toHaveBeenCalledTimes(1);
@@ -242,11 +370,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     const b = s.speak("second");
 
     resolve(fake.pipeline);
-    // Both calls share the in-flight load, then each independently
-    // hits the Task-2 stub throw — collect both rejections to keep
-    // the promise hygiene clean for the assertion at the end.
-    await expect(a).rejects.toThrow(/not yet implemented/);
-    await expect(b).rejects.toThrow(/not yet implemented/);
+    await Promise.all([a, b]);
 
     expect(mocks.pipeline).toHaveBeenCalledTimes(1);
   });
@@ -261,7 +385,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
 
     // Detach BEFORE the load triggers — must observe no states.
     unsubscribe();
-    await expect(s.speak("hi")).rejects.toThrow(/not yet implemented/);
+    await s.speak("hi");
 
     expect(seen).toEqual([]);
     // And the loading state still settled correctly even with no listeners.
@@ -273,6 +397,11 @@ describe("KokoroSpeaker — load error classification", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     mocks.pipeline.mockReset();
+    installAudioContext();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("transitions to 'error' and rejects when the pipeline factory rejects", async () => {
@@ -318,18 +447,14 @@ describe("KokoroSpeaker — load error classification", () => {
   });
 
   it("allows a retry after a failure — the cached rejected promise is dropped", async () => {
-    // First load fails; second load succeeds. Without dropping the
-    // cached promise on failure the second call would short-circuit
-    // to the same rejection forever.
+    // First load fails; second load succeeds.
     mocks.pipeline.mockRejectedValueOnce(new Error("transient"));
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValueOnce(fake.pipeline);
 
     const s = new KokoroSpeaker();
     await expect(s.speak("hi")).rejects.toThrow(/Failed to load Kokoro model/);
-    // Second call now hits the success branch — and lands on the
-    // Task-2 "not yet implemented" stub AFTER load succeeds.
-    await expect(s.speak("hi")).rejects.toThrow(/not yet implemented/);
+    await s.speak("hi");
 
     expect(mocks.pipeline).toHaveBeenCalledTimes(2);
     expect(s.getLoadingState()).toBe("ready");
@@ -346,11 +471,271 @@ describe("KokoroSpeaker — load error classification", () => {
     });
     s.subscribe((st) => seen.push(st));
 
-    await expect(s.speak("hi")).rejects.toThrow(/not yet implemented/);
+    await s.speak("hi");
 
     // Despite the first listener throwing, the second listener saw the
     // full transition sequence — the production code's try/catch
     // around each callback is what enforces this.
     expect(seen).toEqual(["loading", "ready"]);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// Task 3 — speak() synthesis + Web Audio playback + voice option
+// ────────────────────────────────────────────────────────────────────
+
+describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)", () => {
+  let audioState: FakeContextState;
+
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    mocks.pipeline.mockReset();
+    audioState = installAudioContext();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("resolves immediately on empty input, does not invoke pipeline or construct AudioContext", async () => {
+    mocks.pipeline.mockResolvedValue(makeFakePipeline().pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("");
+
+    expect(mocks.pipeline).not.toHaveBeenCalled();
+    expect(audioState.contexts).toHaveLength(0);
+  });
+
+  it("resolves immediately on whitespace-only input — same no-op contract", async () => {
+    mocks.pipeline.mockResolvedValue(makeFakePipeline().pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("   \n\t  ");
+
+    expect(mocks.pipeline).not.toHaveBeenCalled();
+    expect(audioState.contexts).toHaveLength(0);
+  });
+
+  it("invokes the Kokoro pipeline with the default voice when no override is supplied", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("hello world");
+
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]).toEqual({ text: "hello world", options: { voice: DEFAULT_VOICE } });
+    expect(s.getVoice()).toBe(DEFAULT_VOICE);
+  });
+
+  it("invokes the Kokoro pipeline with a constructor-supplied voice override", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker({ voice: "af_heart" });
+    await s.speak("hello");
+
+    expect(fake.calls[0]?.options).toEqual({ voice: "af_heart" });
+    expect(s.getVoice()).toBe("af_heart");
+  });
+
+  it("DEFAULT_VOICE is 'bf_emma' per AD-10", () => {
+    // Pin the constant so a refactor that accidentally changes the
+    // default fails this test rather than silently switching voices.
+    expect(DEFAULT_VOICE).toBe("bf_emma");
+  });
+
+  it("wraps the pipeline output in an AudioBuffer at the reported sample rate", async () => {
+    const fixtureAudio = new Float32Array(2400); // 100 ms at 24 kHz
+    for (let i = 0; i < fixtureAudio.length; i++) {
+      fixtureAudio[i] = Math.sin((2 * Math.PI * i) / 24);
+    }
+    const fake = makeFakePipeline({ audio: fixtureAudio, sampling_rate: 24000 });
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("non-empty");
+
+    expect(audioState.buffers).toHaveLength(1);
+    const buffer = audioState.buffers[0]!;
+    // Mono buffer at the pipeline's reported rate. Length matches the
+    // samples we passed in — Kokoro's 24 kHz mono is the rate the
+    // design plan + §6.4 specify.
+    expect(buffer.numberOfChannels).toBe(1);
+    expect(buffer.sampleRate).toBe(24000);
+    expect(buffer.length).toBe(fixtureAudio.length);
+    // The audio data was actually copied into the buffer channel.
+    expect(buffer.copyToChannel).toHaveBeenCalledTimes(1);
+    expect(buffer.copyToChannel).toHaveBeenCalledWith(fixtureAudio, 0);
+  });
+
+  it("schedules the buffer on a source node and connects it to the destination", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("hi");
+
+    expect(audioState.sources).toHaveLength(1);
+    const source = audioState.sources[0]!;
+    expect(source.buffer).toBe(audioState.buffers[0]);
+    expect(source.connect).toHaveBeenCalledTimes(1);
+    expect(source.connect).toHaveBeenCalledWith(audioState.contexts[0]!.destination);
+    expect(source.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("AC-1: the Promise resolves only when source.onended fires, not before", async () => {
+    // Drive `onended` manually so the test can assert that the
+    // Promise is pending until the event fires.
+    audioState.autoEnd = false;
+
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    const speakPromise = s.speak("hi");
+
+    let resolved = false;
+    void speakPromise.then(() => {
+      resolved = true;
+    });
+
+    // Give the event loop multiple ticks to settle the pipeline call
+    // and the AudioContext setup. The Promise must STILL be pending —
+    // synthesis having completed does not equal playback having
+    // completed (the entire point of AC-1).
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+    }
+    expect(resolved).toBe(false);
+
+    // Drive playback end manually.
+    audioState.sources[0]!.onended!();
+    await speakPromise;
+    expect(resolved).toBe(true);
+  });
+
+  it("AC-3 fixture: non-silent samples reach the buffer, duration proportional to input text length", async () => {
+    // Two inputs of different lengths: each gets a fake-pipeline
+    // output sized proportionally (mirroring how a real TTS model's
+    // audio length scales with input characters). Asserts that the
+    // wrapped AudioBuffer's duration tracks the input proportionally
+    // and that the samples themselves are non-silent.
+    const shortText = "hi";
+    const longText = "hello world, this is a longer utterance";
+
+    const samplesPerChar = 1200; // arbitrary but deterministic
+    const sampleRate = 24000;
+
+    function makeNonSilent(length: number): Float32Array {
+      const a = new Float32Array(length);
+      for (let i = 0; i < length; i++) {
+        a[i] = Math.sin((2 * Math.PI * i) / 32);
+      }
+      return a;
+    }
+
+    // First synthesis — short text.
+    const shortAudio = makeNonSilent(shortText.length * samplesPerChar);
+    const fake1 = makeFakePipeline({ audio: shortAudio, sampling_rate: sampleRate });
+    mocks.pipeline.mockResolvedValue(fake1.pipeline);
+    const s1 = new KokoroSpeaker();
+    await s1.speak(shortText);
+    const shortBuffer = audioState.buffers.at(-1)!;
+    expect(shortBuffer.length).toBe(shortAudio.length);
+    // Samples are non-silent — the buffer's channel data contains
+    // non-zero entries after copyToChannel ran.
+    const shortChannel = shortBuffer.channels[0]!;
+    const shortNonZero = Array.from(shortChannel).some((v) => v !== 0);
+    expect(shortNonZero).toBe(true);
+
+    // Reset between Speakers so we can install a different mock output.
+    mocks.pipeline.mockReset();
+    const longAudio = makeNonSilent(longText.length * samplesPerChar);
+    const fake2 = makeFakePipeline({ audio: longAudio, sampling_rate: sampleRate });
+    mocks.pipeline.mockResolvedValue(fake2.pipeline);
+    const s2 = new KokoroSpeaker();
+    await s2.speak(longText);
+    const longBuffer = audioState.buffers.at(-1)!;
+    expect(longBuffer.length).toBe(longAudio.length);
+    const longChannel = longBuffer.channels[0]!;
+    const longNonZero = Array.from(longChannel).some((v) => v !== 0);
+    expect(longNonZero).toBe(true);
+
+    // Duration ratio matches input-text-length ratio (within float
+    // tolerance). This is the substantive AC-3 assertion — a longer
+    // utterance produces proportionally longer audio.
+    const durationRatio = longBuffer.duration / shortBuffer.duration;
+    const textRatio = longText.length / shortText.length;
+    expect(durationRatio).toBeCloseTo(textRatio, 5);
+  });
+
+  it("subsequent speak() calls reuse the cached pipeline (audio still flows)", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("first");
+    await s.speak("second");
+    expect(mocks.pipeline).toHaveBeenCalledTimes(1);
+    expect(fake.calls).toHaveLength(2);
+    expect(fake.calls[0]?.text).toBe("first");
+    expect(fake.calls[1]?.text).toBe("second");
+  });
+
+  it("AudioContext is constructed lazily on first non-empty speak()", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    expect(audioState.contexts).toHaveLength(0);
+    await s.speak("hi");
+    expect(audioState.contexts).toHaveLength(1);
+    // A second speak() reuses the same context — no second instance.
+    await s.speak("again");
+    expect(audioState.contexts).toHaveLength(1);
+  });
+
+  it("throws an actionable error if the pipeline returns an unexpected output shape", async () => {
+    const malformed = makeFakePipeline({ unexpected: "shape" } as unknown);
+    mocks.pipeline.mockResolvedValue(malformed.pipeline);
+
+    const s = new KokoroSpeaker();
+    await expect(s.speak("hi")).rejects.toThrow(/unexpected output shape/);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// Task 3 — extractSynthesisOutput parser (unit-level)
+// ────────────────────────────────────────────────────────────────────
+
+describe("extractSynthesisOutput — output parser", () => {
+  it("returns the audio + sampling_rate fields verbatim from a well-formed output", () => {
+    const audio = new Float32Array([0.1, -0.2]);
+    expect(extractSynthesisOutput({ audio, sampling_rate: 24000 })).toEqual({
+      audio,
+      sampling_rate: 24000,
+    });
+  });
+
+  it("throws on null input", () => {
+    expect(() => extractSynthesisOutput(null)).toThrow(/unexpected output shape/);
+  });
+
+  it("throws when audio is not a Float32Array", () => {
+    expect(() => extractSynthesisOutput({ audio: [0.1], sampling_rate: 24000 })).toThrow(
+      /unexpected output shape/,
+    );
+  });
+
+  it("throws when sampling_rate is not a number", () => {
+    expect(() =>
+      extractSynthesisOutput({ audio: new Float32Array(0), sampling_rate: "24000" }),
+    ).toThrow(/unexpected output shape/);
+  });
+
+  it("throws when fields are missing", () => {
+    expect(() => extractSynthesisOutput({})).toThrow(/unexpected output shape/);
   });
 });

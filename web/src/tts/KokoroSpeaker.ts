@@ -7,14 +7,12 @@
  * Layered across the four tasks of Feature #14:
  *   - Task 1 — backend selection + provider logging (AC-4 logging
  *     clause).
- *   - Task 2 (this commit) — lazy Kokoro pipeline loading +
- *     loading-state observable (AC-4 fallback clause). Pipeline is
- *     built on the first `speak()` call; load failures are classified
- *     best-effort. The `speak()` body still throws "not yet
- *     implemented" after the load succeeds — Task 3 wires the real
- *     synthesis + Web Audio playback path on top.
- *   - Task 3 — `speak()` synthesis + Web Audio playback + voice option
- *     (AC-1, AC-3).
+ *   - Task 2 — lazy Kokoro pipeline loading + loading-state observable
+ *     (AC-4 fallback clause).
+ *   - Task 3 (this commit) — `speak()` synthesis + Web Audio playback
+ *     + voice option (AC-1, AC-3). Invokes the Kokoro pipeline with the
+ *     configured voice, wraps the result in a Web Audio buffer, and
+ *     resolves the returned Promise only when playback ends.
  *   - Task 4 — `cancel()` coordination + `dispose()` lifecycle (AC-2).
  *
  * The class is exported through `./index.ts` alongside the existing
@@ -58,14 +56,55 @@ export type LoadingState = "idle" | "loading" | "ready" | "error";
  * input text and returns the synthesised audio plus a `.dispose()`
  * for resource release. The real Transformers.js type is wider
  * (additional pipeline options, batch inputs, etc.); narrowing here
- * keeps the Task-2 code small and lets Task 3 add overloads/options
- * (notably the `voice` arg) as needed.
+ * keeps the Task-2 code small.
  */
 type TtsPipeline = Awaited<ReturnType<typeof pipeline<"text-to-speech">>>;
 
 /** Model id pinned by AD-10. Kept module-local so tests do not have to
  *  hard-code the same string in two places. */
 export const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+
+/** Default voice pinned by AD-10. Constructor `voice` option overrides. */
+export const DEFAULT_VOICE = "bf_emma";
+
+/**
+ * Shape of a single Kokoro synthesis output. The Transformers.js v3
+ * text-to-speech pipeline returns `{ audio: Float32Array,
+ * sampling_rate: number }`; we parse defensively so a minor library
+ * version drift that wraps or renames either field does not silently
+ * pass through.
+ */
+type SynthesisOutput = {
+  audio: Float32Array;
+  sampling_rate: number;
+};
+
+/**
+ * Reduce the structured output of the Kokoro pipeline to the
+ * `{ audio, sampling_rate }` shape `speak()` needs to wrap in an
+ * `AudioBuffer`. Throws an actionable error if the pipeline returned
+ * something that does not look like a TTS output — this guards against
+ * a future Transformers.js shape change masking as silent dialogue.
+ *
+ * Exported so Task 3's tests can pin the parser contract directly
+ * without round-tripping through the full pipeline mock.
+ */
+export function extractSynthesisOutput(result: unknown): SynthesisOutput {
+  if (
+    result !== null &&
+    typeof result === "object" &&
+    "audio" in result &&
+    "sampling_rate" in result &&
+    (result as { audio: unknown }).audio instanceof Float32Array &&
+    typeof (result as { sampling_rate: unknown }).sampling_rate === "number"
+  ) {
+    const r = result as { audio: Float32Array; sampling_rate: number };
+    return { audio: r.audio, sampling_rate: r.sampling_rate };
+  }
+  throw new Error(
+    "Kokoro pipeline returned an unexpected output shape (expected { audio: Float32Array, sampling_rate: number })",
+  );
+}
 
 /**
  * Classify a thrown error from `pipeline(...)` into one of three coarse
@@ -113,8 +152,24 @@ function loadErrorMessage(cause: LoadErrorCause, err: unknown): string {
   }
 }
 
+/**
+ * Constructor options for `KokoroSpeaker`. The `voice` option is
+ * the only configurable field today; per-call voice override is
+ * Parking Lot (Feature #14 body).
+ */
+export interface KokoroSpeakerOptions {
+  /**
+   * Voice id forwarded to the Kokoro pipeline on every `speak()` call.
+   * Defaults to `DEFAULT_VOICE` (`"bf_emma"`) per AD-10. Override at
+   * construction time; switching voices mid-Speaker is intentionally
+   * not supported in this Feature.
+   */
+  voice?: string;
+}
+
 export class KokoroSpeaker implements Speaker {
   private readonly provider: Provider;
+  private readonly voice: string;
   /**
    * Cached construction promise. Null until the first call to
    * `speak()`. Holding the promise (rather than the resolved
@@ -131,6 +186,21 @@ export class KokoroSpeaker implements Speaker {
    * way to detach a listener from outside the class.
    */
   private readonly listeners: Set<(state: LoadingState) => void> = new Set();
+  /**
+   * The owned `AudioContext`. Lazily constructed on the first
+   * non-empty `speak()` call (constructor in some browsers requires a
+   * user gesture, so deferring keeps the constructor side-effect free).
+   * Set to null after `dispose()` (Task 4).
+   */
+  private audioContext: AudioContext | null = null;
+  /**
+   * The `AudioBufferSourceNode` currently scheduled for playback, or
+   * `null` if no playback is in flight. Task 3 writes this so Task 4's
+   * `cancel()` can read it and call `source.stop()` without having to
+   * touch `speak()` again. The field is also cleared on natural
+   * `onended` so cancel after natural completion is a safe no-op.
+   */
+  private activeSource: AudioBufferSourceNode | null = null;
 
   /**
    * Probes `navigator.gpu` synchronously and pins the provider for the
@@ -145,9 +215,12 @@ export class KokoroSpeaker implements Speaker {
    *
    * The Kokoro pipeline and the `AudioContext` are deliberately NOT
    * instantiated here — see `loadPipeline()` (Task 2) for the lazy
-   * pipeline gate and Task 3 for the lazy `AudioContext` gate.
+   * pipeline gate and `ensureAudioContext()` (Task 3) for the lazy
+   * AudioContext gate.
+   *
+   * Optional `options.voice` overrides the AD-10 default `"bf_emma"`.
    */
-  constructor() {
+  constructor(options: KokoroSpeakerOptions = {}) {
     // `navigator.gpu` is the WebGPU entry point per the W3C WebGPU spec.
     // It is undefined in browsers without WebGPU and in jsdom (the test
     // environment), so the wasm-fallback branch is the natural default
@@ -160,6 +233,7 @@ export class KokoroSpeaker implements Speaker {
       ((navigator as unknown as { gpu?: unknown }).gpu ?? null) !== null;
 
     this.provider = hasWebGPU ? "webgpu" : "wasm";
+    this.voice = options.voice ?? DEFAULT_VOICE;
     // Deterministic single-line log so AC-4 can be verified from the
     // browser console without inspecting internal fields.
     console.log(`provider: ${this.provider}`);
@@ -172,6 +246,15 @@ export class KokoroSpeaker implements Speaker {
    */
   getProvider(): Provider {
     return this.provider;
+  }
+
+  /**
+   * Return the configured voice. Exposed so the dialogue hook or a
+   * future UI can render the active voice without inspecting private
+   * fields.
+   */
+  getVoice(): string {
+    return this.voice;
   }
 
   /** Return the current pipeline-loading state. */
@@ -222,10 +305,6 @@ export class KokoroSpeaker implements Speaker {
    * during construction transitions state to `"error"`, clears the
    * cached promise (so a retry can be attempted later), and re-throws
    * a classified error.
-   *
-   * Exposed via `protected`-equivalent access for Task 3 — the
-   * synthesis path will call this and then run the result through the
-   * AudioContext. Task 2 itself only exercises this via `speak()`.
    */
   private loadPipeline(): Promise<TtsPipeline> {
     if (this.pipelinePromise !== null) {
@@ -252,45 +331,132 @@ export class KokoroSpeaker implements Speaker {
   }
 
   /**
-   * Synthesise `text` to speech.
-   *
-   * Task 2 layer: triggers the lazy pipeline load and drives the
-   * `idle → loading → ready` (or `→ error`) transitions observers
-   * subscribed for. Beyond the load, the body throws "not yet
-   * implemented" — Task 3 wires the real Kokoro invocation + Web
-   * Audio playback path on top, and Task 4 coordinates `cancel()`.
-   *
-   * Load failures are surfaced as the classified Error from
-   * `loadPipeline()`; runtime synthesis failures (Task 3) will
-   * propagate unchanged so the dialogue hook's generic
-   * "Speech synthesis failed" branch can pick them up.
+   * Lazily construct the owned `AudioContext`. The constructor for
+   * `AudioContext` can throw before a user gesture in some browsers,
+   * so we defer until the first non-empty `speak()` call. The context
+   * lives for the lifetime of the Speaker — Task 4 closes it in
+   * `dispose()`.
    */
-  async speak(_text: string): Promise<void> {
-    await this.loadPipeline();
-    // Task-2 stub: load done, but synthesis + playback wiring is
-    // Task 3's concern. Throwing rather than silently no-oping
-    // surfaces a Task-3 regression that forgets to replace this
-    // line, instead of letting a partial implementation ship that
-    // looks like a silent dialogue (Promise resolves but nothing
-    // plays).
-    throw new Error("KokoroSpeaker.speak() not yet implemented — pending Task 3");
+  private ensureAudioContext(): AudioContext {
+    if (this.audioContext === null) {
+      // `AudioContext` is provided by the Web Audio API in browsers.
+      // jsdom does not implement it; tests stub the global constructor
+      // before constructing the Speaker.
+      this.audioContext = new AudioContext();
+    }
+    return this.audioContext;
   }
 
   /**
-   * Cancel any in-flight playback. Task-2 stub: no-op. Task 4 wires
+   * Synthesise `text` to speech and play it through the Web Audio API.
+   *
+   * Behaviour:
+   *
+   *   - Empty / whitespace-only text resolves immediately, does not
+   *     invoke the pipeline, and does not construct an `AudioContext`.
+   *     Matches `WhisperTranscriber`'s empty-segment semantics: a
+   *     no-content turn is a successful no-op.
+   *   - Non-empty text: awaits the lazy pipeline load (which drives
+   *     the `idle → loading → ready` transitions observers
+   *     subscribed for), invokes Kokoro with the configured voice,
+   *     wraps the resulting samples in an `AudioBuffer` on the owned
+   *     `AudioContext`, schedules them on an `AudioBufferSourceNode`,
+   *     starts playback, and resolves when the source's `onended`
+   *     fires.
+   *   - The resolver is pinned in the Promise constructor closure so
+   *     Task 4's `cancel()` can pre-fire it without going through the
+   *     `onended` path (the active source's `.stop()` will also fire
+   *     `onended`, but resolving first guarantees the caller is
+   *     unblocked even if `.stop()` throws).
+   *
+   * Load failures are surfaced as the classified Error from
+   * `loadPipeline()`; runtime synthesis or playback failures propagate
+   * unchanged so the dialogue hook's generic "Speech synthesis failed"
+   * branch can pick them up.
+   */
+  async speak(text: string): Promise<void> {
+    // Empty / whitespace-only input: resolve immediately. This matches
+    // the empty-segment contract on the sibling `Transcriber`
+    // interface and lets the dialogue hook treat a no-speech reply as
+    // a successful no-op turn without special-casing the consumer.
+    if (text.trim() === "") {
+      return;
+    }
+
+    const tts = await this.loadPipeline();
+
+    // Call Kokoro with the configured voice. Transformers.js v3's
+    // public `TextToAudioPipelineOptions` type does not declare a
+    // `voice` field (it predates Kokoro's model-specific options),
+    // but the runtime pipeline accepts and forwards it to the
+    // Kokoro model — narrow the type at the call site so the rest
+    // of the file stays type-clean.
+    const callWithVoice = tts as unknown as (
+      text: string,
+      options: { voice: string },
+    ) => Promise<unknown>;
+    const rawResult = await callWithVoice(text, { voice: this.voice });
+    const { audio, sampling_rate } = extractSynthesisOutput(rawResult);
+
+    const ctx = this.ensureAudioContext();
+    // Mono buffer at the pipeline's reported sample rate (24 kHz for
+    // Kokoro). The Web Audio API automatically resamples to the
+    // context's output rate (typically 48 kHz on macOS) — no explicit
+    // resampling needed in the Speaker.
+    const buffer = ctx.createBuffer(1, audio.length, sampling_rate);
+    // `copyToChannel` is the canonical Web Audio path; it handles the
+    // detached-ArrayBuffer / SAB-cloning edge cases the underlying
+    // implementation cares about. The first arg is the source data,
+    // the second the channel index. The cast narrows from
+    // `Float32Array<ArrayBufferLike>` (the type Transformers.js exposes
+    // for forward-compat with SharedArrayBuffer) to
+    // `Float32Array<ArrayBuffer>` (what lib.dom.d.ts's copyToChannel
+    // accepts under TS 5.7+). Kokoro never returns SAB-backed audio,
+    // so the cast is safe at runtime.
+    buffer.copyToChannel(audio as Float32Array<ArrayBuffer>, 0);
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+
+    // Track the active source so Task 4's `cancel()` can call
+    // `source.stop()` on it. Cleared on natural `onended` so a cancel
+    // arriving after natural completion is a safe no-op.
+    this.activeSource = source;
+
+    // Resolve-on-playback-end: the Promise constructor closure pins
+    // the resolver so Task 4 can also call it from `cancel()`. The
+    // `onended` event fires for both natural end-of-buffer AND
+    // explicit `source.stop()` — so this single path serves both the
+    // success branch (AC-1) and the cancel branch (AC-2) cleanly.
+    await new Promise<void>((resolve) => {
+      source.onended = () => {
+        // Clear the active-source pointer first so a cancel() that
+        // raced with natural completion sees null and no-ops.
+        if (this.activeSource === source) {
+          this.activeSource = null;
+        }
+        resolve();
+      };
+      source.start();
+    });
+  }
+
+  /**
+   * Cancel any in-flight playback. Task-3 stub: no-op. Task 4 wires
    * the real coordination with the active source node + in-flight
    * `speak()` resolver.
    */
   cancel(): void {
-    // Intentionally empty in Task 2.
+    // Intentionally empty in Task 3.
   }
 
   /**
-   * Release the underlying model + audio resources. Task-2 stub: no-op.
+   * Release the underlying model + audio resources. Task-3 stub: no-op.
    * Task 4 wires the full teardown (pipeline release, AudioContext
    * close, subscriber drop, state reset).
    */
   dispose(): void {
-    // Intentionally empty in Task 2.
+    // Intentionally empty in Task 3.
   }
 }
