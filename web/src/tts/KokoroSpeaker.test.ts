@@ -739,3 +739,312 @@ describe("extractSynthesisOutput — output parser", () => {
     expect(() => extractSynthesisOutput({})).toThrow(/unexpected output shape/);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────
+// Task 4 — cancel() coordination + dispose() lifecycle (AC-2)
+// ────────────────────────────────────────────────────────────────────
+
+describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
+  let audioState: FakeContextState;
+
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    mocks.pipeline.mockReset();
+    audioState = installAudioContext();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("cancel() while playback is active: source.stop is called and the in-flight speak() Promise resolves", async () => {
+    // Hold playback open so cancel() can act on a live source.
+    audioState.autoEnd = false;
+
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    const speakPromise = s.speak("hi");
+
+    // Yield enough microtasks for the load + synthesis + source.start
+    // to settle, then assert the source is in flight.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(audioState.sources).toHaveLength(1);
+    const source = audioState.sources[0]!;
+    expect(source.started).toBe(true);
+    expect(source.stopped).toBe(false);
+
+    // Now cancel — speak() must resolve without error and source.stop
+    // must have been called.
+    s.cancel();
+    await expect(speakPromise).resolves.toBeUndefined();
+    expect(source.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancel() while playback is active: Speaker is reusable — a follow-up speak() works", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    // First call: cancel during playback.
+    audioState.autoEnd = false;
+    const first = s.speak("a");
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    s.cancel();
+    await first;
+
+    // Second call: allow natural completion.
+    audioState.autoEnd = true;
+    await s.speak("b");
+
+    // Pipeline factory invoked once (cached); synthesis callable
+    // invoked twice (one per speak); two sources created.
+    expect(mocks.pipeline).toHaveBeenCalledTimes(1);
+    expect(fake.calls).toHaveLength(2);
+    expect(audioState.sources).toHaveLength(2);
+  });
+
+  it("cancel() while synthesis is in flight: speak() resolves, no source constructed", async () => {
+    // Make the pipeline call (synthesis) pending — load itself
+    // resolves normally.
+    let resolveSynth!: (out: unknown) => void;
+    const pendingSynth = new Promise<unknown>((r) => {
+      resolveSynth = r;
+    });
+    const synthCallable = Object.assign(
+      vi.fn(() => pendingSynth),
+      { dispose: vi.fn().mockResolvedValue(undefined) },
+    );
+    mocks.pipeline.mockResolvedValue(synthCallable as unknown);
+
+    const s = new KokoroSpeaker();
+    const speakPromise = s.speak("hi");
+
+    // Yield until the synthesis call has been issued.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(synthCallable).toHaveBeenCalledTimes(1);
+    // No source has been constructed yet — synthesis is still pending.
+    expect(audioState.sources).toHaveLength(0);
+
+    // Cancel while synthesis is pending.
+    s.cancel();
+    // Now late-resolve synthesis with a valid output.
+    resolveSynth({ audio: new Float32Array(240), sampling_rate: 24000 });
+
+    // speak() must resolve cleanly without scheduling playback.
+    await expect(speakPromise).resolves.toBeUndefined();
+    expect(audioState.sources).toHaveLength(0);
+  });
+
+  it("cancel() while synthesis is in flight: a follow-up speak() still works", async () => {
+    // First synthesis pending; cancel; second synthesis succeeds.
+    let resolveFirst!: (out: unknown) => void;
+    const synthCallable = vi.fn();
+    synthCallable.mockReturnValueOnce(
+      new Promise((r) => {
+        resolveFirst = r;
+      }),
+    );
+    synthCallable.mockResolvedValueOnce({
+      audio: new Float32Array(240),
+      sampling_rate: 24000,
+    });
+    const callable = Object.assign(synthCallable, {
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+    mocks.pipeline.mockResolvedValue(callable as unknown);
+
+    const s = new KokoroSpeaker();
+    const first = s.speak("a");
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    s.cancel();
+    resolveFirst({ audio: new Float32Array(240), sampling_rate: 24000 });
+    await first;
+
+    // Second call uses the same cached pipeline; synthesis completes
+    // immediately; source is constructed and plays naturally.
+    await s.speak("b");
+    expect(audioState.sources).toHaveLength(1);
+    expect(callable).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancel() with no active speak() is a safe no-op (no throw)", () => {
+    const s = new KokoroSpeaker();
+    expect(() => s.cancel()).not.toThrow();
+    expect(() => s.cancel()).not.toThrow(); // double-cancel also safe
+  });
+
+  it("cancel() before any speak() does not latently abort the next speak()", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    s.cancel(); // pre-speak cancel
+    await s.speak("hi");
+
+    // The speak() call ran to completion — a source was constructed
+    // and natural playback ended (autoEnd default true).
+    expect(audioState.sources).toHaveLength(1);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it("cancel() does not reject the in-flight speak() — Promise resolves without error", async () => {
+    audioState.autoEnd = false;
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    const speakPromise = s.speak("hi");
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+
+    s.cancel();
+    // AC-2 explicit: "in-flight speak() Promise resolves without error".
+    let resolved = false;
+    let rejected: unknown = null;
+    await speakPromise.then(
+      () => {
+        resolved = true;
+      },
+      (err) => {
+        rejected = err;
+      },
+    );
+    expect(resolved).toBe(true);
+    expect(rejected).toBe(null);
+  });
+});
+
+describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
+  let audioState: FakeContextState;
+
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    mocks.pipeline.mockReset();
+    audioState = installAudioContext();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("dispose() before any speak() is a safe no-op (state stays 'idle')", () => {
+    const s = new KokoroSpeaker();
+
+    expect(() => s.dispose()).not.toThrow();
+    expect(s.getLoadingState()).toBe("idle");
+    expect(audioState.contexts).toHaveLength(0);
+  });
+
+  it("dispose() after a successful load releases the pipeline and closes the AudioContext", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("hi");
+    expect(s.getLoadingState()).toBe("ready");
+    expect(audioState.contexts).toHaveLength(1);
+
+    s.dispose();
+    expect(s.getLoadingState()).toBe("idle");
+    // AudioContext.close was called.
+    expect(audioState.contexts[0]!.close).toHaveBeenCalledTimes(1);
+    // The pipeline.dispose() is fire-and-forget — yield microtasks so
+    // the .then chain in the production code can run.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fake.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispose() while playback is active: cancels the playback and releases resources", async () => {
+    audioState.autoEnd = false;
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    const speakPromise = s.speak("hi");
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+
+    s.dispose();
+    await expect(speakPromise).resolves.toBeUndefined();
+
+    // Source was stopped via the cancel() code path that dispose()
+    // routes through.
+    expect(audioState.sources[0]!.stop).toHaveBeenCalledTimes(1);
+    // AudioContext closed.
+    expect(audioState.contexts[0]!.close).toHaveBeenCalledTimes(1);
+    // State reset.
+    expect(s.getLoadingState()).toBe("idle");
+  });
+
+  it("dispose() detaches subscribers — no notifications fire on subsequent state changes", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    const seen: LoadingState[] = [];
+    s.subscribe((st) => seen.push(st));
+
+    // Load once so the listener has something to observe, then dispose
+    // and load again.
+    await s.speak("hi");
+    expect(seen).toEqual(["loading", "ready"]);
+
+    s.dispose();
+    // Subsequent load should NOT notify the dropped listener.
+    await s.speak("again");
+    expect(seen).toEqual(["loading", "ready"]);
+    // After re-load, the Speaker is again in 'ready' (lazy re-load
+    // succeeded).
+    expect(s.getLoadingState()).toBe("ready");
+  });
+
+  it("double-dispose is a safe no-op", async () => {
+    const fake = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake.pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("hi");
+    s.dispose();
+    expect(() => s.dispose()).not.toThrow();
+    // The second dispose did not call close again — pipeline + ctx
+    // were already cleared on the first call.
+    expect(audioState.contexts[0]!.close).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fake.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispose() with nothing active (no load, no playback): safe no-op", () => {
+    const s = new KokoroSpeaker();
+    // No speak ever called.
+    expect(() => s.dispose()).not.toThrow();
+    // No context was constructed (lazy AudioContext was never created).
+    expect(audioState.contexts).toHaveLength(0);
+  });
+
+  it("speak() after dispose() lazily re-loads the pipeline and re-creates the AudioContext", async () => {
+    // dispose() does not permanently disable speak() — the Speaker
+    // returns to its initial idle state and a follow-up speak() acts
+    // exactly like the first call on a fresh instance. Verifies that
+    // the disposed flag (if any) does not lock out the reusable
+    // pathway.
+    const fake1 = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake1.pipeline);
+
+    const s = new KokoroSpeaker();
+    await s.speak("first");
+    s.dispose();
+    expect(audioState.contexts).toHaveLength(1);
+
+    // Re-arm the mock for the second load (the prior cache was
+    // cleared by dispose).
+    mocks.pipeline.mockReset();
+    const fake2 = makeFakePipeline();
+    mocks.pipeline.mockResolvedValue(fake2.pipeline);
+
+    await s.speak("second");
+    expect(audioState.contexts).toHaveLength(2);
+    expect(mocks.pipeline).toHaveBeenCalledTimes(1);
+  });
+});

@@ -9,11 +9,14 @@
  *     clause).
  *   - Task 2 — lazy Kokoro pipeline loading + loading-state observable
  *     (AC-4 fallback clause).
- *   - Task 3 (this commit) — `speak()` synthesis + Web Audio playback
- *     + voice option (AC-1, AC-3). Invokes the Kokoro pipeline with the
- *     configured voice, wraps the result in a Web Audio buffer, and
- *     resolves the returned Promise only when playback ends.
- *   - Task 4 — `cancel()` coordination + `dispose()` lifecycle (AC-2).
+ *   - Task 3 — `speak()` synthesis + Web Audio playback + voice option
+ *     (AC-1, AC-3).
+ *   - Task 4 (this commit) — `cancel()` coordination + `dispose()`
+ *     lifecycle (AC-2). `cancel()` resolves the in-flight `speak()`
+ *     Promise without error and stops the active source; `dispose()`
+ *     cancels any in-flight playback, fire-and-forget releases the
+ *     loaded pipeline, closes the owned `AudioContext`, detaches
+ *     subscribers, and resets state to `"idle"`.
  *
  * The class is exported through `./index.ts` alongside the existing
  * `Speaker` type so consumers import from a single barrel — same shape
@@ -201,6 +204,26 @@ export class KokoroSpeaker implements Speaker {
    * `onended` so cancel after natural completion is a safe no-op.
    */
   private activeSource: AudioBufferSourceNode | null = null;
+  /**
+   * Resolver for the in-flight `speak()` Promise. Pinned by the
+   * Promise constructor closure inside `speak()` so `cancel()` can
+   * resolve the awaiter without going through the `source.onended`
+   * path. AC-2 requires the in-flight `speak()` to resolve (not
+   * reject) when `cancel()` is called — resolving directly via this
+   * field is the cleanest way to honour that even if `source.stop()`
+   * later throws.
+   */
+  private activeResolver: (() => void) | null = null;
+  /**
+   * Abort flag set by `cancel()` so the cancel-during-synthesis path
+   * (cancel called while the pipeline call is still in flight) can
+   * discard the late-arriving synthesis result and resolve `speak()`
+   * without ever scheduling playback. AC-2's "cancel while synthesis
+   * is in flight" branch relies on this. Reset at the top of every
+   * `speak()` so a cancel that arrives before any speak() does not
+   * latently abort the next call.
+   */
+  private activeAborted = false;
 
   /**
    * Probes `navigator.gpu` synchronously and pins the provider for the
@@ -383,6 +406,11 @@ export class KokoroSpeaker implements Speaker {
       return;
     }
 
+    // Reset the abort flag at the entry to every speak() so a stray
+    // `cancel()` that arrived before any speak() (legal no-op per AC)
+    // does not latently abort this call.
+    this.activeAborted = false;
+
     const tts = await this.loadPipeline();
 
     // Call Kokoro with the configured voice. Transformers.js v3's
@@ -396,6 +424,18 @@ export class KokoroSpeaker implements Speaker {
       options: { voice: string },
     ) => Promise<unknown>;
     const rawResult = await callWithVoice(text, { voice: this.voice });
+
+    // Cancel-during-synthesis path (AC-2): if `cancel()` set the abort
+    // flag while the pipeline call was in flight, discard the
+    // late-arriving synthesis result and resolve `speak()` without
+    // ever scheduling playback. No `AudioBufferSourceNode` is
+    // constructed; no audio is played. The Speaker is fully reusable
+    // — a subsequent `speak()` resets the flag at entry.
+    if (this.activeAborted) {
+      this.activeAborted = false;
+      return;
+    }
+
     const { audio, sampling_rate } = extractSynthesisOutput(rawResult);
 
     const ctx = this.ensureAudioContext();
@@ -425,16 +465,20 @@ export class KokoroSpeaker implements Speaker {
     this.activeSource = source;
 
     // Resolve-on-playback-end: the Promise constructor closure pins
-    // the resolver so Task 4 can also call it from `cancel()`. The
-    // `onended` event fires for both natural end-of-buffer AND
-    // explicit `source.stop()` — so this single path serves both the
+    // the resolver so `cancel()` can also call it. The `onended`
+    // event fires for both natural end-of-buffer AND explicit
+    // `source.stop()` — so this single path serves both the
     // success branch (AC-1) and the cancel branch (AC-2) cleanly.
     await new Promise<void>((resolve) => {
+      this.activeResolver = resolve;
       source.onended = () => {
         // Clear the active-source pointer first so a cancel() that
         // raced with natural completion sees null and no-ops.
         if (this.activeSource === source) {
           this.activeSource = null;
+        }
+        if (this.activeResolver === resolve) {
+          this.activeResolver = null;
         }
         resolve();
       };
@@ -443,20 +487,125 @@ export class KokoroSpeaker implements Speaker {
   }
 
   /**
-   * Cancel any in-flight playback. Task-3 stub: no-op. Task 4 wires
-   * the real coordination with the active source node + in-flight
-   * `speak()` resolver.
+   * Cancel any in-flight `speak()`. AC-2:
+   *
+   *   - During playback: stops the active `AudioBufferSourceNode`
+   *     and resolves the in-flight `speak()` Promise *without error*.
+   *     The resolver is invoked BEFORE `source.stop()` so the
+   *     caller's awaiter is unblocked even if `.stop()` throws
+   *     (defence-in-depth — `.stop()` should not, but Web Audio
+   *     implementations have surprised us before).
+   *   - During synthesis (pipeline call still in flight): sets the
+   *     `activeAborted` flag so the abort check after the pipeline
+   *     call returns short-circuits before constructing a source.
+   *   - With no active `speak()`: safe no-op. The `activeAborted`
+   *     flag may be set transiently but the next `speak()` resets
+   *     it at entry, so no latent abort leaks into a later turn.
+   *
+   * `cancel()` is reusable: after a cancel, a follow-up `speak()`
+   * call still works — the loaded pipeline and the owned
+   * `AudioContext` are not released here (`dispose()` does that).
    */
   cancel(): void {
-    // Intentionally empty in Task 3.
+    // Set the abort flag first so a cancel-during-synthesis is
+    // observed by the post-synthesis check inside `speak()`.
+    this.activeAborted = true;
+
+    // Resolve the pending Promise BEFORE calling `source.stop()` so
+    // the awaiter is unblocked even if `.stop()` throws.
+    const resolver = this.activeResolver;
+    if (resolver !== null) {
+      this.activeResolver = null;
+      resolver();
+    }
+
+    // Stop the active source. Wrapping in try/catch because
+    // `.stop()` can throw `InvalidStateError` if the source was
+    // never started or has already been stopped — both safe to
+    // ignore in this code path.
+    const source = this.activeSource;
+    if (source !== null) {
+      this.activeSource = null;
+      try {
+        source.stop();
+      } catch {
+        /* defensive — see above */
+      }
+    }
   }
 
   /**
-   * Release the underlying model + audio resources. Task-3 stub: no-op.
-   * Task 4 wires the full teardown (pipeline release, AudioContext
-   * close, subscriber drop, state reset).
+   * Release the underlying model + audio resources and reset the
+   * Speaker to its initial state.
+   *
+   *   - Cancel any in-flight playback (same code path as `cancel()`).
+   *   - Release the cached Kokoro pipeline via its `.dispose()`
+   *     (fire-and-forget — `dispose()` is synchronous-by-interface
+   *     per the `Speaker` type, and the pipeline's release is
+   *     independent of the JS-side teardown).
+   *   - Close the owned `AudioContext` (also fire-and-forget — the
+   *     returned `Promise<void>` is not awaited; rejections are
+   *     swallowed).
+   *   - Detach all loading-state subscribers.
+   *   - Reset state to `"idle"`.
+   *
+   * `dispose()` is idempotent: a second call finds every field
+   * already null / cleared and exits cleanly without throwing. It
+   * also leaves the Speaker in a state where a subsequent `speak()`
+   * would lazily re-load the pipeline and re-create the
+   * `AudioContext` — the class behaves as if freshly constructed.
    */
   dispose(): void {
-    // Intentionally empty in Task 3.
+    // First cancel any in-flight speak so the caller's Promise is
+    // unblocked and the source is stopped.
+    this.cancel();
+    // Reset the abort flag set by the cancel() call above — leaving
+    // it true would latently abort the very next speak() if the
+    // disposed Speaker is reused.
+    this.activeAborted = false;
+
+    // Fire-and-forget pipeline dispose. Matches the
+    // `WhisperTranscriber.dispose()` shape: chain `.then(p =>
+    // p.dispose().catch(()=>undefined)).catch(()=>undefined)` so a
+    // rejection in either link is swallowed and no UnhandledRejection
+    // surfaces.
+    if (this.pipelinePromise !== null) {
+      const promise = this.pipelinePromise;
+      promise
+        .then((p) => {
+          // `.dispose()` is the Transformers.js `Disposable` typedef;
+          // returns `Promise<void>`. We do not await here because
+          // dispose() is synchronous-by-interface.
+          p.dispose().catch(() => undefined);
+        })
+        .catch(() => undefined);
+      this.pipelinePromise = null;
+    }
+
+    // Close the owned AudioContext (returns a Promise — do not await;
+    // dispose() is synchronous-by-interface). Catch any rejection
+    // silently so a teardown race in some implementations does not
+    // surface as a noisy console error.
+    if (this.audioContext !== null) {
+      const ctx = this.audioContext;
+      this.audioContext = null;
+      try {
+        const closeResult = ctx.close();
+        // `close()` returns a Promise in Web Audio; jsdom mocks may
+        // return undefined. Guard before chaining.
+        if (closeResult && typeof closeResult.catch === "function") {
+          closeResult.catch(() => undefined);
+        }
+      } catch {
+        /* defensive */
+      }
+    }
+
+    // Drop subscribers and reset to the initial state. A future
+    // `speak()` re-loads the pipeline lazily (which drives a fresh
+    // idle → loading → ready transition that the post-dispose
+    // re-subscribers would observe).
+    this.listeners.clear();
+    this.loadingState = "idle";
   }
 }
