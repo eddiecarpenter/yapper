@@ -164,6 +164,122 @@ describe("useDialogue — Task 2: voice turn loop and timing", () => {
   });
 });
 
+describe("useDialogue — Task 3: conversation history and truncation", () => {
+  it("accumulates user + assistant messages after each turn", async () => {
+    let replyCounter = 0;
+    const transcripts = ["hello", "again", "third"];
+    const replies = ["hi back", "and again", "third reply"];
+
+    const deps = makeStubDeps({
+      transcribe: async () => transcripts[replyCounter] ?? "",
+    });
+    const { result } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    for (let turn = 0; turn < 3; turn++) {
+      const reply = replies[turn] ?? "";
+      await driveSingleTurn(result, () => deps.fireSpeechEnd(), getWs(), [reply]);
+      replyCounter++;
+    }
+
+    expect(result.current.history).toHaveLength(6);
+    expect(result.current.history.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    expect(result.current.history.map((m) => m.content)).toEqual([
+      "hello",
+      "hi back",
+      "again",
+      "and again",
+      "third",
+      "third reply",
+    ]);
+  });
+
+  it("sends prior history (before this turn's append) to the relay", async () => {
+    let counter = 0;
+    const deps = makeStubDeps({
+      transcribe: async () => `utterance-${counter}`,
+    });
+    const { result } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    // Turn 1 — no prior history sent
+    await driveSingleTurn(result, () => deps.fireSpeechEnd(), getWs(), ["reply-0"]);
+    counter++;
+    let sent = getWs().lastSent<{ history: Message[] }>();
+    expect(sent?.history).toEqual([]);
+
+    // Turn 2 — prior history = [user:utterance-0, assistant:reply-0]
+    await driveSingleTurn(result, () => deps.fireSpeechEnd(), getWs(), ["reply-1"]);
+    counter++;
+    sent = getWs().lastSent<{ history: Message[] }>();
+    expect(sent?.history).toEqual([
+      { role: "user", content: "utterance-0" },
+      { role: "assistant", content: "reply-0" },
+    ]);
+
+    // Turn 3 — prior history = 4 messages
+    await driveSingleTurn(result, () => deps.fireSpeechEnd(), getWs(), ["reply-2"]);
+    sent = getWs().lastSent<{ history: Message[] }>();
+    expect(sent?.history).toHaveLength(4);
+    expect(sent?.history[3]).toEqual({ role: "assistant", content: "reply-1" });
+  });
+
+  it("drops the oldest non-system message when contextBudget is exceeded", async () => {
+    // Budget of 4 estimated tokens. Each turn adds 2 single-word messages
+    // → 2 words → ceil(2 * 1.3) = 3 tokens. After two turns we'd have 4
+    // messages → 4 words → ceil(4 * 1.3) = 6 tokens > 4 → truncate.
+    const deps = makeStubDeps({ transcribe: async () => "user" });
+    const { result } = renderHook(() => useDialogue(makeOptions(deps, { contextBudget: 4 })));
+
+    await driveSingleTurn(result, () => deps.fireSpeechEnd(), getWs(), ["assist"]);
+    await driveSingleTurn(result, () => deps.fireSpeechEnd(), getWs(), ["assist"]);
+
+    // After two turns + truncation: history must be shorter than 4.
+    expect(result.current.history.length).toBeLessThan(4);
+    expect(result.current.history.length).toBeGreaterThan(0);
+  });
+
+  it("retains the leading system message under aggressive truncation", async () => {
+    const deps = makeStubDeps({ transcribe: async () => "userword" });
+    const seedSystem: Message = { role: "system", content: "You are Yapper." };
+
+    const { result } = renderHook(() =>
+      useDialogue(
+        makeOptions(deps, {
+          contextBudget: 3,
+          initialHistory: [seedSystem],
+        }),
+      ),
+    );
+
+    for (let i = 0; i < 3; i++) {
+      await driveSingleTurn(result, () => deps.fireSpeechEnd(), getWs(), ["replyword"]);
+    }
+
+    // System prompt is still index 0 …
+    expect(result.current.history[0]).toEqual(seedSystem);
+    // … and some non-system messages have been dropped.
+    expect(result.current.history.length).toBeLessThan(1 + 6);
+  });
+
+  it("seeds history from opts.initialHistory on mount", () => {
+    const deps = makeStubDeps();
+    const seed: Message[] = [
+      { role: "system", content: "primer" },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ];
+    const { result } = renderHook(() => useDialogue(makeOptions(deps, { initialHistory: seed })));
+
+    expect(result.current.history).toEqual(seed);
+  });
+});
+
 describe("useDialogue — Task 1 scaffold contracts (still hold)", () => {
   it("returns the initial idle state on first render (before WS opens)", () => {
     const deps = makeStubDeps();

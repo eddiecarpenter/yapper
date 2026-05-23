@@ -68,6 +68,14 @@ export interface DialogueOptions {
    * documented in the design plan (Risk R3) and applied in Task 3.
    */
   contextBudget?: number;
+  /**
+   * Conversation history to seed the hook with on mount. The standard
+   * use is a single `role:"system"` message at index 0 carrying the
+   * system prompt — the sliding-window truncation in Task 3 always
+   * retains it. Subsequent user/assistant turns are appended by the
+   * hook itself; callers should not mutate this array after construction.
+   */
+  initialHistory?: ReadonlyArray<Message>;
 }
 
 /** Default sliding-window context budget when none is supplied. */

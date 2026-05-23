@@ -1,8 +1,9 @@
 import { useEffect, useReducer, useRef } from "react";
 
 import type { Message } from "../llm/types";
+import { appendTurn } from "./history";
 import type { DialogueOptions, DialogueStage, DialogueState, TimingRecord } from "./types";
-import { INITIAL_DIALOGUE_STATE } from "./types";
+import { DEFAULT_CONTEXT_BUDGET, INITIAL_DIALOGUE_STATE } from "./types";
 import type { RelayFrame } from "./wire";
 import { STT_SAMPLE_RATE_HZ, parseRelayFrame } from "./wire";
 
@@ -25,14 +26,33 @@ import { STT_SAMPLE_RATE_HZ, parseRelayFrame } from "./wire";
 
 type Action =
   | { type: "STAGE"; stage: DialogueStage }
-  | { type: "COMPLETE_TURN"; timing: TimingRecord };
+  | {
+      type: "COMPLETE_TURN";
+      timing: TimingRecord;
+      userText: string;
+      assistantReply: string;
+      contextBudget: number;
+    };
 
 function reducer(state: DialogueState, action: Action): DialogueState {
   switch (action.type) {
     case "STAGE":
       return { ...state, stage: action.stage, error: null };
-    case "COMPLETE_TURN":
-      return { ...state, stage: "listening", lastTiming: action.timing, error: null };
+    case "COMPLETE_TURN": {
+      const nextHistory = appendTurn(
+        state.history,
+        action.userText,
+        action.assistantReply,
+        action.contextBudget,
+      );
+      return {
+        ...state,
+        stage: "listening",
+        lastTiming: action.timing,
+        error: null,
+        history: nextHistory,
+      };
+    }
     default: {
       // Exhaustiveness check — TS will flag if a new Action variant is added
       // without a corresponding case.
@@ -57,7 +77,18 @@ interface RelayTurnResult {
 }
 
 export function useDialogue(opts: DialogueOptions): DialogueState {
-  const [state, dispatch] = useReducer(reducer, INITIAL_DIALOGUE_STATE);
+  // Lazy initial state — seeded with `opts.initialHistory` on first render
+  // only. The lazy form prevents re-rendering with a new `initialHistory`
+  // from clobbering an in-progress conversation; the system prompt seed
+  // is a mount-time concern, not a re-render concern.
+  const [state, dispatch] = useReducer<typeof reducer, DialogueOptions>(
+    reducer,
+    opts,
+    (o: DialogueOptions): DialogueState => ({
+      ...INITIAL_DIALOGUE_STATE,
+      history: o.initialHistory ?? [],
+    }),
+  );
 
   // Latest-opts ref pattern: the effect runs once on mount, but the async
   // turn handler must see the *current* dependency references in case the
@@ -66,10 +97,11 @@ export function useDialogue(opts: DialogueOptions): DialogueState {
   const optsRef = useRef<DialogueOptions>(opts);
   optsRef.current = opts;
 
-  // History ref — Task 2 sends an empty history with every turn (Task 3
-  // wires this to actual state). Keeping it in a ref now so Task 3 needs
-  // only swap the assignment site, not the dispatch flow.
-  const historyRef = useRef<ReadonlyArray<Message>>([]);
+  // History ref — points at the current accumulated history so the async
+  // turn handler can send the *pre-append* snapshot to the relay (per
+  // Task 3: "history passed to the relay ... includes all current history
+  // before appending the new user message").
+  const historyRef = useRef<ReadonlyArray<Message>>(state.history);
   historyRef.current = state.history;
 
   useEffect(() => {
@@ -133,7 +165,15 @@ export function useDialogue(opts: DialogueOptions): DialogueState {
       // PROJECT_BRIEF.md §"Deliverables / Latency report".
       console.table(timing);
 
-      dispatch({ type: "COMPLETE_TURN", timing });
+      dispatch({
+        type: "COMPLETE_TURN",
+        timing,
+        userText: text,
+        assistantReply: reply,
+        // Read budget from the latest opts so a caller can tighten or
+        // loosen the window across renders.
+        contextBudget: optsRef.current.contextBudget ?? DEFAULT_CONTEXT_BUDGET,
+      });
     };
 
     vad.onSpeechEnd = handleSpeechEnd;
