@@ -1,0 +1,29 @@
+{
+  "name": "@yapper/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Yapper browser SPA — voice loop modules (dialogue hook, VAD, STT, TTS, LLM client)",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,json,md}\"",
+    "format": "prettier --write \"src/**/*.{ts,tsx,json,md}\""
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.4.6",
+    "@testing-library/react": "^16.0.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "jsdom": "^24.1.0",
+    "prettier": "^3.3.2",
+    "typescript": "^5.5.3",
+    "vitest": "^2.0.0"
+  }
+}
