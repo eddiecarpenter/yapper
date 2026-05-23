@@ -22,7 +22,7 @@ on:
 
 jobs:
   pipeline:
-    uses: eddiecarpenter/gh-agentic/.github/workflows/agentic-pipeline.yml@v2.8.9
+    uses: eddiecarpenter/gh-agentic/.github/workflows/agentic-pipeline.yml@v2.8.18
     with:
       pr_number: ${{ inputs.pr_number || '' }}
       branch_name: ${{ inputs.branch_name || '' }}
@@ -31,4 +31,5 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      actions: read
 
