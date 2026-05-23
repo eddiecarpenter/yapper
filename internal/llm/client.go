@@ -1,12 +1,20 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/eddiecarpenter/yapper/internal/config"
+)
 
 // LLMClient is the provider-agnostic interface the WebSocket relay
 // uses to talk to whichever model backend is configured. Adapters
 // for OpenAI-compatible providers (Ollama, OpenAI, Groq, OpenRouter)
 // and Anthropic implement this interface; the relay selects between
-// them via NewLLMClient at startup (added in Task 3).
+// them via NewLLMClient at startup.
 //
 // Both methods must respect ctx cancellation — a closed browser
 // connection in the WebSocket handler propagates a cancel through
@@ -29,4 +37,37 @@ type LLMClient interface {
 	// final value in a single shot.
 	CompleteStream(ctx context.Context, req CompletionRequest,
 		onToken func(string), onUsage func(Usage)) (*CompletionResponse, error)
+}
+
+// anthropicHostMarker is the hostname substring that selects the
+// AnthropicLLMClient adapter from NewLLMClient. The match is
+// case-insensitive and substring-based so both production
+// (api.anthropic.com) and staging hosts route correctly. The choice
+// reflects AC-4 on Feature #15: "endpoint contains anthropic.com →
+// AnthropicLLMClient".
+const anthropicHostMarker = "anthropic.com"
+
+// NewLLMClient returns the LLMClient adapter that matches cfg.BaseURL.
+//
+//   - cfg.BaseURL host contains "anthropic.com" (case-insensitive) →
+//     AnthropicLLMClient with the cfg.APIKey wired through.
+//   - Anything else (Ollama, OpenAI, Groq, OpenRouter, custom local
+//     proxies) → OpenAILLMClient.
+//
+// The single hostname heuristic lets one config field (base_url)
+// cover every provider the spike supports — a config change between
+// dev and prod is one line.
+func NewLLMClient(cfg config.LLMConfig) (LLMClient, error) {
+	if cfg.BaseURL == "" {
+		return nil, errors.New("llm: base URL is empty")
+	}
+	parsed, err := url.Parse(cfg.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("llm: parse base URL %q: %w", cfg.BaseURL, err)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if strings.Contains(host, anthropicHostMarker) {
+		return NewAnthropicLLMClient(cfg.BaseURL, cfg.APIKey), nil
+	}
+	return NewOpenAILLMClient(cfg.BaseURL, cfg.APIKey), nil
 }
