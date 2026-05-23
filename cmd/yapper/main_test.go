@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -44,58 +43,23 @@ func TestRun_HelpFlag_ReturnsNil(t *testing.T) {
 	}
 }
 
-func TestBuildServer_RootReturns204(t *testing.T) {
-	srv := buildServer(config.Defaults())
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	srv.Handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNoContent {
-		t.Errorf("status: got %d, want %d", rec.Code, http.StatusNoContent)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("body: got %d bytes, want empty", rec.Body.Len())
-	}
-}
-
-func TestBuildServer_UsesConfiguredPort(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.Server.Port = 14321
-	srv := buildServer(cfg)
-	if got, want := srv.Addr, ":14321"; got != want {
-		t.Errorf("Addr: got %q, want %q", got, want)
-	}
-	if srv.ReadHeaderTimeout != readHeaderTimeout {
-		t.Errorf("ReadHeaderTimeout: got %v, want %v", srv.ReadHeaderTimeout, readHeaderTimeout)
-	}
-}
-
 // TestRunServe_StartsAndShutsDown is the closest thing to an
-// integration test for the binary — it spins up the serve loop on an
-// ephemeral port via env override, hits the stub `/` endpoint, then
-// cancels the context to verify graceful shutdown returns nil.
+// integration test for the binary — it spins up the serve loop on a
+// fixed high port via the YAPPER_SERVER_PORT env override, hits the
+// stub `/` endpoint, then cancels the context to verify graceful
+// shutdown returns nil. The LLM adapter is constructed but never
+// called, so this test does not depend on a real Ollama instance.
 func TestRunServe_StartsAndShutsDown(t *testing.T) {
-	t.Setenv(config.EnvServerPort, "0") // requesting port 0 is rejected upstream — verify the path errors out cleanly
-	_ = t.TempDir()                     // keep parity with other tests that chdir; not needed here
+	t.Setenv(config.EnvServerPort, "18877")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	// We don't want to bind on a privileged or contested port. Use a
-	// well-known ephemeral range port and rely on the OS to allocate.
-	// runServe consumes from the YAPPER_SERVER_PORT env var when no
-	// flag is supplied; we provide a high port.
-	t.Setenv(config.EnvServerPort, "18877")
 
 	done := make(chan error, 1)
 	go func() {
 		done <- runServe(ctx, nil)
 	}()
 
-	// Wait for the server to start accepting connections, with a
-	// short polling budget — keeps the test fast on a healthy
-	// runner and gives clear failure otherwise.
 	deadline := time.Now().Add(2 * time.Second)
 	var resp *http.Response
 	var err error

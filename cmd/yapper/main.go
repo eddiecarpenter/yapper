@@ -1,16 +1,17 @@
 // Command yapper is the Go relay server for the Yapper local-first
-// voice assistant spike. It serves a small HTTP surface and (once
-// Task 4 lands) a WebSocket upgrade endpoint that proxies turns from
-// the browser dialogue loop to a configurable LLM backend.
+// voice assistant spike. It serves a WebSocket relay endpoint (`/ws`)
+// that proxies turns from the browser dialogue loop to a configurable
+// LLM backend, plus a small stub HTTP surface for health probes.
 //
-// At this stage the binary supports a single subcommand:
+// The binary supports a single subcommand:
 //
 //	yapper serve [--config path]
 //
-// which loads configuration via the internal/config package and
-// starts an HTTP server on the configured port. The default
-// configuration (AD-4) targets a local Ollama instance at
-// localhost:11434/v1 with the llama3.2:3b model.
+// which loads configuration via the internal/config package,
+// constructs the LLM adapter via llm.NewLLMClient (Ollama by default,
+// per AD-4), wires both into the api.NewServer mux, and runs an HTTP
+// server on the configured port. Shutdown on SIGINT/SIGTERM is
+// graceful with a bounded drain window.
 package main
 
 import (
@@ -23,21 +24,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/eddiecarpenter/yapper/internal/api"
 	"github.com/eddiecarpenter/yapper/internal/config"
+	"github.com/eddiecarpenter/yapper/internal/llm"
 )
 
-// shutdownTimeout caps the time the server is given to drain in-flight
-// requests after a shutdown signal arrives.
+// shutdownTimeout caps the time the server is given to drain
+// in-flight requests after a shutdown signal arrives.
 const shutdownTimeout = 5 * time.Second
-
-// readHeaderTimeout caps how long the server waits for request
-// headers — a sane default for any net/http server exposed beyond
-// localhost.
-const readHeaderTimeout = 10 * time.Second
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stderr); err != nil {
@@ -70,8 +67,9 @@ func printUsage(w io.Writer) {
 }
 
 // runServe parses the `serve` subcommand flags, loads configuration,
-// and runs the HTTP server until the supplied context is cancelled
-// or a signal (SIGINT / SIGTERM) arrives.
+// constructs the LLM adapter and the api.Server, and runs the HTTP
+// server until the supplied context is cancelled or SIGINT/SIGTERM
+// arrives.
 func runServe(parent context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "path to YAML config file (optional)")
@@ -84,7 +82,12 @@ func runServe(parent context.Context, args []string) error {
 		return err
 	}
 
-	srv := buildServer(cfg)
+	llmClient, err := llm.NewLLMClient(cfg.LLM)
+	if err != nil {
+		return fmt.Errorf("init llm client: %w", err)
+	}
+
+	srv := api.NewServer(cfg, llmClient)
 
 	log.Printf("server starting on %s (llm=%s/%s base_url=%s api_key=%s)",
 		srv.Addr, cfg.LLM.Provider, cfg.LLM.Model, cfg.LLM.BaseURL,
@@ -111,23 +114,4 @@ func runServe(parent context.Context, args []string) error {
 	case err := <-errCh:
 		return err
 	}
-}
-
-// buildServer constructs the http.Server and its routing mux. Task 4
-// will mount the real `/ws` upgrade endpoint and adjust the `/`
-// behaviour; until then `/` returns 204 No Content so reverse-proxy
-// health probes succeed and any browser hit shows the relay is up
-// without leaking error pages.
-func buildServer(cfg *config.Config) *http.Server {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", stubRootHandler)
-	return &http.Server{
-		Addr:              ":" + strconv.Itoa(cfg.Server.Port),
-		Handler:           mux,
-		ReadHeaderTimeout: readHeaderTimeout,
-	}
-}
-
-func stubRootHandler(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
 }
