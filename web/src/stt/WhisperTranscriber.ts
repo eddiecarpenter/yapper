@@ -6,21 +6,16 @@
  *
  * Layered across the three tasks of Feature #13:
  *   - Task 1 — backend selection + provider logging (AC-2 / AC-3).
- *   - Task 2 (this commit) — lazy ASR-pipeline loading + loading-state
- *     observable (AC-4). The pipeline (~145 MB on first run) is NOT
- *     constructed in the class constructor; it is built on the first
- *     `transcribe()` call and the construction promise is cached so
- *     subsequent calls do not re-load. The class exposes a
- *     `LoadingState` machine (`idle` → `loading` → `ready` | `error`)
- *     via `getLoadingState()` plus a `subscribe(listener)` API so the
- *     SPA shell or `useDialogue` can render the loading indicator
- *     AC-4 requires. Load failures are classified best-effort
- *     (network / storage-quota / unknown) so the UI can surface
- *     something more actionable than "an error occurred".
- *   - Task 3 — transcription wiring (AC-1). Until then `transcribe()`
- *     resolves with the empty string once the pipeline has loaded;
- *     this leaves the loading semantics observable without coupling
- *     the load test to a real model invocation.
+ *   - Task 2 — lazy ASR-pipeline loading + loading-state observable
+ *     (AC-4). Pipeline is built on the first transcribe() call;
+ *     load failures are classified best-effort.
+ *   - Task 3 (this commit) — transcription wiring (AC-1). `transcribe()`
+ *     validates the sample rate (the audio module is responsible for
+ *     resampling upstream per §6.3), runs the audio through the cached
+ *     pipeline, and reduces the structured output to the plain
+ *     transcript string the `Transcriber` interface contract requires.
+ *     Empty / whitespace-only output is normalised to `""` per the
+ *     existing JSDoc on `web/src/stt/types.ts`.
  *
  * The class is exported through `./index.ts` alongside the existing
  * `Transcriber` type so consumers import from a single barrel.
@@ -64,9 +59,17 @@ export type LoadingState = "idle" | "loading" | "ready" | "error";
  */
 type AsrPipeline = Awaited<ReturnType<typeof pipeline<"automatic-speech-recognition">>>;
 
-/** Model id pinned by AD-11. Kept module-local so Task 3's tests do not
- *  have to hard-code the same string in two places. */
+/** Model id pinned by AD-11. Kept module-local so tests do not have to
+ *  hard-code the same string in two places. */
 export const WHISPER_MODEL_ID = "Xenova/whisper-base.en";
+
+/** Sample rate the Transcriber accepts. The audio module is responsible
+ *  for resampling upstream per `docs/ARCHITECTURE.md` §6.3, so a
+ *  mismatch is a programmer error and surfaces as an actionable Error
+ *  rather than a silent re-resample (which would either duplicate
+ *  upstream work or drift from the VAD's rate). The value matches
+ *  `STT_SAMPLE_RATE_HZ` in `web/src/dialogue/wire.ts`. */
+export const REQUIRED_SAMPLE_RATE_HZ = 16000;
 
 /**
  * Classify a thrown error from `pipeline(...)` into one of three coarse
@@ -101,6 +104,52 @@ function classifyLoadError(err: unknown): LoadErrorCause {
     }
   }
   return "unknown";
+}
+
+/**
+ * Reduce the structured output of the Transformers.js ASR pipeline to
+ * the plain transcript string the `Transcriber` interface contract
+ * requires. The pipeline returns `{ text: string, chunks?: Chunk[] }`
+ * by default; when `chunk_length_s` is set it can return an array of
+ * such objects. We never enable chunking, but we accept both shapes
+ * so a future tuning task that turns chunking on for long-segment
+ * support does not silently regress the public return type.
+ *
+ * Whitespace-only output is normalised to `""` per the JSDoc on
+ * `web/src/stt/types.ts`: "Promise resolves with `""` when the
+ * segment contained no recognised speech".
+ *
+ * Exported so Task 3's tests can pin the reducer contract directly
+ * without round-tripping through the full pipeline mock.
+ */
+export function extractTranscript(
+  result: unknown,
+): string {
+  // Array shape (chunked) — concatenate the per-chunk `text` fields in
+  // order, then normalise. We do not insert separators because the
+  // chunks overlap and the model emits its own spacing.
+  if (Array.isArray(result)) {
+    const joined = result
+      .map((r) =>
+        r !== null && typeof r === "object" && "text" in r && typeof (r as { text: unknown }).text === "string"
+          ? (r as { text: string }).text
+          : "",
+      )
+      .join("");
+    return joined.trim();
+  }
+  if (
+    result !== null &&
+    typeof result === "object" &&
+    "text" in result &&
+    typeof (result as { text: unknown }).text === "string"
+  ) {
+    return (result as { text: string }).text.trim();
+  }
+  // Anything else (null, missing/invalid `text`) → empty transcript.
+  // The interface contract permits this and the dialogue hook treats
+  // an empty transcript as a no-speech segment to be ignored.
+  return "";
 }
 
 function loadErrorMessage(cause: LoadErrorCause, err: unknown): string {
@@ -247,20 +296,42 @@ export class WhisperTranscriber implements Transcriber {
   }
 
   /**
-   * Task 2 scope — gates transcription on the model being loaded but
-   * leaves the post-load body as a stub returning the empty string.
-   * Task 3 replaces the body with the real audio-handling pipeline
-   * invocation; the lazy-load mechanism stays the same.
+   * Transcribe a 16 kHz mono PCM segment to text.
    *
-   * Note: the load promise is awaited even on the stub return so the
-   * loading-state observable goes through `idle → loading → ready` on
-   * the very first call, satisfying AC-4 today rather than waiting on
-   * Task 3.
+   * - Validates the sample rate before touching the pipeline so a
+   *   wrong rate fails fast without ever paying the 145 MB model
+   *   download cost.
+   * - Awaits the lazy load (Task 2) — on the first call this also
+   *   drives the `idle → loading → ready` transitions observers
+   *   subscribed for.
+   * - Calls the cached pipeline as a function (Transformers.js
+   *   pipelines are callable + disposable) and reduces the
+   *   structured output to the plain transcript string the
+   *   `Transcriber` interface contract requires. `pipeline()` can
+   *   return either a single output object or an array of them
+   *   depending on whether `chunk_length_s` is set; here we never
+   *   set it, so the single-output branch is the expected shape —
+   *   but the reducer accepts both for robustness.
+   * - Normalises empty / whitespace-only output to `""` per the
+   *   existing JSDoc on the interface — "Promise resolves with `""`
+   *   when the segment contained no recognised speech".
+   *
+   * Errors during the pipeline call itself are propagated unchanged;
+   * the caller (e.g. `useDialogue`) wraps them in its own stage-error
+   * machinery. The Task-2 error-taxonomy applies only to model-load
+   * failures, not to inference failures (a different shape — and
+   * the dialogue hook already has a generic "Speech recognition
+   * failed" branch for runtime issues).
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async transcribe(_audio: Float32Array, _sampleRate: number): Promise<string> {
-    await this.loadPipeline();
-    return "";
+  async transcribe(audio: Float32Array, sampleRate: number): Promise<string> {
+    if (sampleRate !== REQUIRED_SAMPLE_RATE_HZ) {
+      throw new Error(
+        `WhisperTranscriber requires ${REQUIRED_SAMPLE_RATE_HZ} Hz audio, got ${sampleRate} Hz`,
+      );
+    }
+    const asr = await this.loadPipeline();
+    const result = await asr(audio);
+    return extractTranscript(result);
   }
 
   /**
