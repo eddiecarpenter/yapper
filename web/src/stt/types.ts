@@ -2,9 +2,11 @@
  * Browser-side Speech-To-Text contract.
  *
  * Canonical definition lives in `docs/ARCHITECTURE.md` §5.3.
- * Implemented by Feature #16 (Whisper STT module) — this file is a stub
- * that Task 1 of #12 introduces so the `useDialogue` hook can be authored
- * against the interface without depending on the implementation.
+ * Implemented by Feature #13 (Whisper STT module — `WhisperTranscriber`).
+ * The interface stub was authored in Feature #12 Task 1 so the
+ * `useDialogue` hook could be written against the contract before the
+ * implementation existed; Feature #13 fills the implementation in
+ * behind the same interface.
  */
 export interface Transcriber {
   /**
