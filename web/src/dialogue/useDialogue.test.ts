@@ -347,3 +347,283 @@ describe("dialogue module surface", () => {
     expect(sample.history).toHaveLength(3);
   });
 });
+
+describe("useDialogue — Task 4: error handling (AC-3) and lifecycle cleanup (AC-4)", () => {
+  /**
+   * Opens the WS, waits for the hook to reach `"listening"`, then drives
+   * one turn:
+   *   1. Calls `fire()` (returns the in-flight handleSpeechEnd promise)
+   *   2. Yields one microtask so the handler reaches its first await
+   *   3. Runs `triggerFrames()` to deliver any relay frames
+   *   4. Awaits the handleSpeechEnd promise so the catch block (if any)
+   *      has completed before the test continues
+   * All four steps live inside a single `act()` so RTL batches the
+   * resulting dispatches deterministically.
+   */
+  async function driveOneTurn(
+    result: { current: DialogueState },
+    deps: ReturnType<typeof makeStubDeps>,
+    triggerFrames: () => void,
+  ): Promise<void> {
+    await act(async () => {
+      getWs().triggerOpen();
+    });
+    await waitFor(() => expect(result.current.stage).toBe<DialogueStage>("listening"));
+
+    await act(async () => {
+      const p = deps.fireSpeechEnd();
+      // Two microtask ticks: one for fireSpeechEnd → handleSpeechEnd's
+      // first await, one for the async function transcribe() to start.
+      await Promise.resolve();
+      await Promise.resolve();
+      triggerFrames();
+      await p;
+    });
+  }
+
+  it("transitions to error with the relay's message on {type:'error'} frame", async () => {
+    const deps = makeStubDeps();
+    const { result } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    await driveOneTurn(result, deps, () => {
+      getWs().triggerMessage({ type: "error", message: "Ollama unreachable at localhost:11434" });
+    });
+
+    expect(result.current.stage).toBe<DialogueStage>("error");
+    expect(result.current.error).toBe("Ollama unreachable at localhost:11434");
+    expect(deps.speaker.speak).not.toHaveBeenCalled();
+  });
+
+  it("auto-recovers from error back to listening after the recovery delay", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const deps = makeStubDeps();
+      const { result } = renderHook(() => useDialogue(makeOptions(deps)));
+
+      await driveOneTurn(result, deps, () => {
+        getWs().triggerMessage({ type: "error", message: "boom" });
+      });
+      expect(result.current.stage).toBe<DialogueStage>("error");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ERROR_RECOVERY_DELAY_MS_EXPECTED);
+      });
+
+      expect(result.current.stage).toBe<DialogueStage>("listening");
+      expect(result.current.error).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces 'Speech recognition failed' when transcribe() throws", async () => {
+    const deps = makeStubDeps({
+      transcribe: async () => {
+        throw new Error("WebGPU lost device");
+      },
+    });
+    const { result } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    await driveOneTurn(result, deps, () => {
+      // No relay frames — failure happens before send.
+    });
+
+    expect(result.current.stage).toBe<DialogueStage>("error");
+    expect(result.current.error).toBe("Speech recognition failed — check WebGPU/WASM availability");
+    expect(getWs().sent).toHaveLength(0);
+  });
+
+  it("surfaces 'Speech synthesis failed' when speak() throws", async () => {
+    const deps = makeStubDeps({
+      speak: async () => {
+        throw new Error("AudioContext suspended");
+      },
+    });
+    const { result } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    await driveOneTurn(result, deps, () => {
+      const ws = getWs();
+      ws.triggerMessage({ type: "token", text: "hi" });
+      ws.triggerMessage({ type: "done", usage: { input: 1, output: 1 } });
+    });
+
+    expect(result.current.stage).toBe<DialogueStage>("error");
+    expect(result.current.error).toBe("Speech synthesis failed — check WebGPU/WASM availability");
+  });
+
+  it("surfaces 'Relay unreachable' when ws.send() throws", async () => {
+    const deps = makeStubDeps();
+    const { result } = renderHook(() =>
+      useDialogue(makeOptions(deps, { relayUrl: "ws://broken:1234/ws" })),
+    );
+
+    await act(async () => {
+      getWs().triggerOpen();
+    });
+    await waitFor(() => expect(result.current.stage).toBe<DialogueStage>("listening"));
+
+    // Close the WS so the next ws.send() throws inside the turn.
+    await act(async () => {
+      getWs().close();
+    });
+
+    await act(async () => {
+      const p = deps.fireSpeechEnd();
+      await Promise.resolve();
+      await Promise.resolve();
+      await p;
+    });
+
+    expect(result.current.stage).toBe<DialogueStage>("error");
+    expect(result.current.error).toBe(
+      "Relay unreachable — check that the Go server is running at ws://broken:1234/ws",
+    );
+  });
+
+  it("surfaces 'Relay unreachable' when the WS closes mid-turn", async () => {
+    const deps = makeStubDeps({ transcribe: async () => "hi" });
+    const { result } = renderHook(() =>
+      useDialogue(makeOptions(deps, { relayUrl: "ws://localhost:8080/ws" })),
+    );
+
+    await driveOneTurn(result, deps, () => {
+      // Close the socket between send and {done} → triggers the close
+      // listener inside collectRelayTurn → rejects with connection error.
+      getWs().close();
+    });
+
+    expect(result.current.stage).toBe<DialogueStage>("error");
+    expect(result.current.error).toBe(
+      "Relay unreachable — check that the Go server is running at ws://localhost:8080/ws",
+    );
+  });
+
+  it("calls speaker.cancel() on unmount if mid-utterance", async () => {
+    // A `speak()` that never resolves — keeps the hook in the "speaking"
+    // stage until the test unmounts.
+    let resolveSpeak: () => void = () => undefined;
+    const speakPromise = new Promise<void>((res) => {
+      resolveSpeak = res;
+    });
+    const deps = makeStubDeps({
+      transcribe: async () => "hi",
+      speak: () => speakPromise,
+    });
+    const { result, unmount } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    await act(async () => {
+      getWs().triggerOpen();
+    });
+    await waitFor(() => expect(result.current.stage).toBe<DialogueStage>("listening"));
+
+    // Start the turn and let it advance to "speaking" — but never await
+    // the handler promise, because speak() will never resolve.
+    await act(async () => {
+      void deps.fireSpeechEnd();
+      await Promise.resolve();
+      await Promise.resolve();
+      getWs().triggerMessage({ type: "token", text: "hi" });
+      getWs().triggerMessage({ type: "done" });
+      // Yield enough ticks for the dispatch into "speaking" to land.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.stage).toBe<DialogueStage>("speaking"));
+
+    unmount();
+
+    expect(deps.speaker.cancel).toHaveBeenCalledTimes(1);
+
+    // Release the dangling promise so vitest cleans up.
+    resolveSpeak();
+  });
+
+  it("calls transcriber.dispose() and vad.dispose() exactly once on unmount", () => {
+    const deps = makeStubDeps();
+    const { unmount } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    expect(deps.transcriber.dispose).not.toHaveBeenCalled();
+    expect(deps.vad.dispose).not.toHaveBeenCalled();
+
+    unmount();
+
+    expect(deps.transcriber.dispose).toHaveBeenCalledTimes(1);
+    expect(deps.vad.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call speaker.cancel() on unmount when not speaking", () => {
+    const deps = makeStubDeps();
+    const { unmount } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    unmount();
+
+    expect(deps.speaker.cancel).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending auto-recovery timer on unmount", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const deps = makeStubDeps();
+      const { result, unmount } = renderHook(() => useDialogue(makeOptions(deps)));
+
+      await driveOneTurn(result, deps, () => {
+        getWs().triggerMessage({ type: "error", message: "boom" });
+      });
+      expect(result.current.stage).toBe<DialogueStage>("error");
+
+      // Unmount BEFORE the recovery timer fires.
+      unmount();
+
+      // Advance past the recovery delay — the cleared timer must not
+      // fire, and no dispatch-after-unmount warning may be raised.
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(deps.vad.dispose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("survives a subsequent successful turn after auto-recovery", async () => {
+    let firstAttempt = true;
+    const deps = makeStubDeps({
+      transcribe: async () => {
+        if (firstAttempt) {
+          firstAttempt = false;
+          throw new Error("first attempt fails");
+        }
+        return "second-utterance";
+      },
+    });
+    const { result } = renderHook(() => useDialogue(makeOptions(deps)));
+
+    // First turn fails → error.
+    await driveOneTurn(result, deps, () => {
+      // No frames — transcribe rejects before send.
+    });
+    expect(result.current.stage).toBe<DialogueStage>("error");
+
+    // Real timers — wait for the 500ms recovery to elapse naturally.
+    await waitFor(() => expect(result.current.stage).toBe<DialogueStage>("listening"), {
+      timeout: 2000,
+    });
+
+    // Second turn succeeds.
+    await act(async () => {
+      const p = deps.fireSpeechEnd();
+      await Promise.resolve();
+      await Promise.resolve();
+      getWs().triggerMessage({ type: "token", text: "ok" });
+      getWs().triggerMessage({ type: "done" });
+      await p;
+    });
+
+    expect(result.current.stage).toBe<DialogueStage>("listening");
+    expect(result.current.history).toHaveLength(2);
+    expect(result.current.history[0]?.content).toBe("second-utterance");
+    expect(result.current.history[1]?.content).toBe("ok");
+  });
+});
+
+/** Mirror of the production constant — kept here so the test imports stay scoped. */
+const ERROR_RECOVERY_DELAY_MS_EXPECTED = 500;

@@ -11,6 +11,24 @@ import type { Message } from "../llm/types";
 /** Sample rate of the audio segment passed to `Transcriber.transcribe()`. */
 export const STT_SAMPLE_RATE_HZ = 16000;
 
+/**
+ * Tagged relay-side error. `source === "connection"` means the WebSocket
+ * itself failed (send threw, or the socket closed mid-turn) — the hook
+ * surfaces this as a generic "Relay unreachable" message. `source ===
+ * "frame"` means the relay sent a `{type:"error"}` payload — the hook
+ * surfaces that exact `message` to the user, since the relay's framing
+ * encodes upstream diagnostics (e.g. "Ollama unreachable at ...").
+ */
+export class RelayError extends Error {
+  public readonly source: "connection" | "frame";
+
+  constructor(message: string, source: "connection" | "frame") {
+    super(message);
+    this.name = "RelayError";
+    this.source = source;
+  }
+}
+
 export interface TurnRequest {
   type: "turn";
   text: string;
