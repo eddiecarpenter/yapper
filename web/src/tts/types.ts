@@ -2,7 +2,7 @@
  * Browser-side Text-To-Speech contract.
  *
  * Canonical definition lives in `docs/ARCHITECTURE.md` §5.3.
- * Implemented by Feature #17 (Kokoro TTS module) — this file is a stub
+ * Implemented by Feature #14 (Kokoro TTS module) — this file is a stub
  * that Task 1 of #12 introduces so the `useDialogue` hook can be authored
  * against the interface without depending on the implementation.
  */
