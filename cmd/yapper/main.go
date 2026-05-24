@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -209,6 +210,17 @@ func runServe(parent context.Context, args []string) error {
 
 	ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Plumb the SIGINT-cancellable context into every inbound
+	// request via BaseContext. When ctx is cancelled (signal
+	// arrives), every r.Context() inherits the cancel — the
+	// WebSocket handler watches r.Context().Done() to close
+	// in-flight hijacked connections cleanly, and the per-turn
+	// LLM context (derived from r.Context()) propagates the
+	// cancel down to the adapter so any streaming completion
+	// aborts within the drain window. This is what Feature 17
+	// Task 6 (AC-2) requires.
+	srv.BaseContext = func(_ net.Listener) context.Context { return ctx }
 
 	errCh := make(chan error, 1)
 	go func() {

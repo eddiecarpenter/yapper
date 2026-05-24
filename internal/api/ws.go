@@ -186,6 +186,32 @@ func (h *WebSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// Watch r.Context() for cancellation triggered by the
+	// server's BaseContext (which main.go derives from the
+	// SIGINT-cancellable context). When the server is shutting
+	// down, this goroutine wakes any in-flight wsjson.Read /
+	// wsjson.Write by closing the connection with a
+	// StatusGoingAway frame. The per-turn LLM context, derived
+	// from r.Context(), is cancelled at the same moment so the
+	// adapter aborts its upstream stream inside the bounded
+	// shutdown drain window (Feature 17 Task 6, AC-2).
+	//
+	// The select races r.Context().Done() against ctx.Done() —
+	// ctx is the per-turn context that the defer cancel() above
+	// fires when ServeHTTP returns normally. Without that race,
+	// the goroutine would leak past every successful turn,
+	// waiting forever for r.Context to cancel.
+	go func() {
+		select {
+		case <-r.Context().Done():
+			_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		case <-ctx.Done():
+			// Normal exit — the per-turn cancel fired. Nothing
+			// to do; the deferred CloseNow / Close calls in
+			// the outer ServeHTTP body will tear down the conn.
+		}
+	}()
+
 	if err := h.handleTurn(ctx, conn, sess); err != nil {
 		log.Printf("ws: turn aborted: %v", err)
 	}
