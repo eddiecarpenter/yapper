@@ -53,7 +53,13 @@ export function makeStubDeps(
   };
   const vad: VAD & { process: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> } = {
     process: vi.fn((_frame: Float32Array) => false),
-    dispose: vi.fn(),
+    // Explicit no-op implementation rather than a bare `vi.fn()` so the
+    // mock's inferred call signature is unambiguously `() => void` and
+    // satisfies the `dispose(): void` slot of the `VAD` interface that
+    // this intersection narrows. Vitest 4's `Mock` default signature is
+    // `(...args: any[]) => any`, which does not structurally satisfy
+    // `() => void` under strict mode without an explicit implementation.
+    dispose: vi.fn((): void => undefined),
   };
 
   const fireSpeechEnd = async (segment?: Float32Array): Promise<void> => {
