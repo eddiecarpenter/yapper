@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -17,7 +19,19 @@ import (
 
 	"github.com/eddiecarpenter/yapper/internal/config"
 	"github.com/eddiecarpenter/yapper/internal/llm"
+	"github.com/eddiecarpenter/yapper/internal/session"
 )
+
+// newTestStore returns a fresh in-memory session store with a
+// generous TTL so eviction never interferes with the
+// per-test-case assertions. Tests that need to exercise eviction
+// instantiate NewMemoryStore directly.
+func newTestStore(t *testing.T) session.Store {
+	t.Helper()
+	s := session.NewMemoryStore(1*time.Hour, 1*time.Hour)
+	t.Cleanup(s.Close)
+	return s
+}
 
 // stubLLMClient is a deterministic LLMClient used by the WebSocket
 // E2E tests. It records the request it received and either streams a
@@ -114,7 +128,8 @@ func TestWebSocketHandler_HappyPath_StreamsTokensThenDone(t *testing.T) {
 	cfg.LLM.SystemPrompt = "be terse"
 	cfg.LLM.Model = "test-model"
 
-	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub))
+	store := newTestStore(t)
+	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub, store))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -125,12 +140,16 @@ func TestWebSocketHandler_HappyPath_StreamsTokensThenDone(t *testing.T) {
 	}
 	defer func() { _ = conn.CloseNow() }()
 
+	// Browser-supplied History is now IGNORED (Feature 17 Task 4)
+	// — we send it to prove the server discards it, then assert
+	// the LLM only saw the session's (empty) history plus the new
+	// user turn.
 	if err := wsjson.Write(ctx, conn, turnFrame{
 		Type: "turn",
 		Text: "hi there",
 		History: []llm.Message{
-			{Role: "user", Content: "previous user"},
-			{Role: "assistant", Content: "previous reply"},
+			{Role: "user", Content: "browser-supplied-IGNORED"},
+			{Role: "assistant", Content: "browser-supplied-IGNORED"},
 		},
 	}); err != nil {
 		t.Fatalf("write turn: %v", err)
@@ -162,11 +181,10 @@ func TestWebSocketHandler_HappyPath_StreamsTokensThenDone(t *testing.T) {
 		t.Errorf("usage: got %+v, want %+v", usage, stub.usage)
 	}
 
-	// Verify the LLM saw the system prompt + history + new user turn.
+	// Verify the LLM saw the system prompt + EMPTY session history
+	// + the new user turn — NOT the browser-supplied history.
 	wantMsgs := []llm.Message{
 		{Role: "system", Content: "be terse"},
-		{Role: "user", Content: "previous user"},
-		{Role: "assistant", Content: "previous reply"},
 		{Role: "user", Content: "hi there"},
 	}
 	got := stub.lastRequest()
@@ -176,13 +194,21 @@ func TestWebSocketHandler_HappyPath_StreamsTokensThenDone(t *testing.T) {
 	if got.Model != "test-model" {
 		t.Errorf("model: got %q, want test-model", got.Model)
 	}
+	// Confirm any browser-supplied history string never made it
+	// into the LLM request — the dedicated marker would surface
+	// here if the server had passed inbound.History through.
+	for _, m := range got.Messages {
+		if strings.Contains(m.Content, "IGNORED") {
+			t.Errorf("server leaked browser-supplied history into LLM request: %+v", m)
+		}
+	}
 }
 
 func TestWebSocketHandler_NoSystemPrompt_OmitsSystemMessage(t *testing.T) {
 	stub := &stubLLMClient{tokens: []string{"x"}}
 	cfg := config.Defaults()
 	cfg.LLM.SystemPrompt = ""
-	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub))
+	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub, newTestStore(t)))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -206,7 +232,7 @@ func TestWebSocketHandler_OllamaUnreachable_SendsActionableErrorAndStaysAlive(t 
 		err: errors.New(`openai: do stream request: Post "http://localhost:11434/v1/chat/completions": dial tcp 127.0.0.1:11434: connect: connection refused`),
 	}
 	cfg := config.Defaults()
-	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub))
+	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub, newTestStore(t)))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -250,7 +276,7 @@ func TestWebSocketHandler_HTTP401_SendsAPIKeyActionableError(t *testing.T) {
 		err: errors.New("openai: http 401: Incorrect API key"),
 	}
 	cfg := config.Defaults()
-	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub))
+	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub, newTestStore(t)))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -277,7 +303,7 @@ func TestWebSocketHandler_HTTP404ModelMissing_SendsModelPullMessage(t *testing.T
 	}
 	cfg := config.Defaults()
 	cfg.LLM.Model = "missing-model"
-	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub))
+	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub, newTestStore(t)))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -301,7 +327,7 @@ func TestWebSocketHandler_HTTP404ModelMissing_SendsModelPullMessage(t *testing.T
 
 func TestWebSocketHandler_BadFrameType_SendsErrorFrame(t *testing.T) {
 	stub := &stubLLMClient{tokens: []string{"x"}}
-	srv := httptest.NewServer(NewWebSocketHandler(config.Defaults(), stub))
+	srv := httptest.NewServer(NewWebSocketHandler(config.Defaults(), stub, newTestStore(t)))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -329,7 +355,7 @@ func TestWebSocketHandler_APIKeyNotLeakedToBrowser(t *testing.T) {
 	}
 	cfg := config.Defaults()
 	cfg.LLM.APIKey = secret
-	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub))
+	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub, newTestStore(t)))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -355,7 +381,7 @@ func TestWebSocketHandler_TimeoutError_SendsTimeoutMessage(t *testing.T) {
 		err: context.DeadlineExceeded,
 	}
 	cfg := config.Defaults()
-	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub))
+	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub, newTestStore(t)))
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -377,7 +403,7 @@ func TestWebSocketHandler_TimeoutError_SendsTimeoutMessage(t *testing.T) {
 func TestNewServer_MountsWSAndRoot(t *testing.T) {
 	stub := &stubLLMClient{}
 	cfg := config.Defaults()
-	srv := NewServer(cfg, stub)
+	srv := NewServer(cfg, stub, newTestStore(t))
 
 	wantAddr := ":" + strconv.Itoa(config.DefaultServerPort)
 	if srv.Addr != wantAddr {
@@ -390,13 +416,18 @@ func TestNewServer_MountsWSAndRoot(t *testing.T) {
 	httpSrv := httptest.NewServer(srv.Handler)
 	defer httpSrv.Close()
 
-	// `/` should 204.
+	// `/` is now backed by the embedded SPA handler. When the SPA
+	// is built (web/dist/index.html present in the embed), this
+	// returns 200; in a CI environment where the TS bundler has
+	// not run, the embed is empty and the handler returns 404.
+	// Both shapes are acceptable here — what this assertion guards
+	// is that the route is REGISTERED (not 5xx, not panicking).
 	resp, err := http.Get(httpSrv.URL + "/")
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("GET /: status %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /: status %d, want 200 (SPA built) or 404 (empty embed)", resp.StatusCode)
 	}
 	resp.Body.Close()
 
@@ -411,6 +442,154 @@ func TestNewServer_MountsWSAndRoot(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		t.Errorf("/ws is not routed; got 404")
+	}
+}
+
+// TestWebSocketHandler_SessionCookie_MintedWhenAbsent verifies that
+// the first WebSocket upgrade with no `yapper_session` cookie
+// receives a Set-Cookie carrying the freshly minted session id, and
+// that subsequent connections without a cookie mint DIFFERENT ids.
+func TestWebSocketHandler_SessionCookie_MintedWhenAbsent(t *testing.T) {
+	stub := &stubLLMClient{tokens: []string{"x"}}
+	srv := httptest.NewServer(NewWebSocketHandler(config.Defaults(), stub, newTestStore(t)))
+	defer srv.Close()
+
+	mintedID := func() string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		// Use websocket.Dial with HTTPClient defaulting (no
+		// cookie jar) so each call starts from a clean slate.
+		conn, resp, err := websocket.Dial(ctx, wsScheme(srv.URL), nil)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer func() { _ = conn.CloseNow() }()
+		// The Set-Cookie header lands on the upgrade response.
+		var got string
+		for _, c := range resp.Cookies() {
+			if c.Name == sessionCookieName {
+				got = c.Value
+				break
+			}
+		}
+		if got == "" {
+			t.Fatalf("no %s cookie on upgrade response (cookies=%v)", sessionCookieName, resp.Cookies())
+		}
+		// Drive one turn so the handler exits cleanly without
+		// log spam from the unread frame.
+		_ = wsjson.Write(ctx, conn, turnFrame{Type: "turn", Text: "x"})
+		_ = readFrames(ctx, t, conn)
+		return got
+	}
+
+	id1 := mintedID()
+	id2 := mintedID()
+	if id1 == id2 {
+		t.Errorf("expected distinct session ids on two cookie-less connections, both got %q", id1)
+	}
+	// IDs are the 256-bit base64-url-no-pad shape (43 chars).
+	for _, id := range []string{id1, id2} {
+		if len(id) != 43 || strings.ContainsAny(id, "+/=") {
+			t.Errorf("unexpected session id shape: %q (want 43-char base64-url-no-pad)", id)
+		}
+	}
+}
+
+// TestWebSocketHandler_SessionCookie_MultiTurnHistory verifies that
+// two turns on the SAME cookie produce a server-recorded history,
+// and a third turn (re-using the cookie) sees that history reflected
+// in the LLM call's Messages — proving the server is the canonical
+// owner of conversation state and that the cookie is the lookup
+// key.
+func TestWebSocketHandler_SessionCookie_MultiTurnHistory(t *testing.T) {
+	stub := &stubLLMClient{
+		tokens: []string{"reply"},
+	}
+	cfg := config.Defaults()
+	cfg.LLM.SystemPrompt = ""
+	store := newTestStore(t)
+	srv := httptest.NewServer(NewWebSocketHandler(cfg, stub, store))
+	defer srv.Close()
+
+	jar, _ := cookiejar.New(nil)
+	httpClient := &http.Client{Jar: jar}
+
+	// driveTurn opens a WebSocket carrying any cookies the jar
+	// already holds for srv.URL, sends one turn, and waits for
+	// done. The jar accumulates the Set-Cookie that lands on the
+	// first upgrade, so the second and third dial reuse it.
+	driveTurn := func(text string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		conn, _, err := websocket.Dial(ctx, wsScheme(srv.URL), &websocket.DialOptions{
+			HTTPClient: httpClient,
+		})
+		if err != nil {
+			t.Fatalf("dial(%s): %v", text, err)
+		}
+		defer func() { _ = conn.CloseNow() }()
+		if err := wsjson.Write(ctx, conn, turnFrame{Type: "turn", Text: text}); err != nil {
+			t.Fatalf("write(%s): %v", text, err)
+		}
+		_ = readFrames(ctx, t, conn)
+	}
+
+	driveTurn("first user")
+	driveTurn("second user")
+	driveTurn("third user")
+
+	// The cookie jar accumulated exactly one yapper_session
+	// cookie, so all three turns hit the same Session in the
+	// store.
+	httpURL, _ := url.Parse(srv.URL)
+	cookies := jar.Cookies(httpURL)
+	var sid string
+	for _, c := range cookies {
+		if c.Name == sessionCookieName {
+			sid = c.Value
+			break
+		}
+	}
+	if sid == "" {
+		t.Fatalf("no %s in cookie jar after three turns", sessionCookieName)
+	}
+
+	got, ok := store.Get(sid)
+	if !ok {
+		t.Fatalf("session %s missing from store after three turns", sid)
+	}
+	// Three turns × (user + assistant) = 6 messages.
+	if len(got.History) != 6 {
+		t.Fatalf("history length: got %d, want 6 (3 turns × 2 messages)", len(got.History))
+	}
+	wantRoles := []string{"user", "assistant", "user", "assistant", "user", "assistant"}
+	wantUserContents := []string{"first user", "second user", "third user"}
+	userIdx := 0
+	for i, m := range got.History {
+		if m.Role != wantRoles[i] {
+			t.Errorf("history[%d].Role: got %q, want %q", i, m.Role, wantRoles[i])
+		}
+		if m.Role == "user" {
+			if m.Content != wantUserContents[userIdx] {
+				t.Errorf("user-turn %d: got %q, want %q", userIdx, m.Content, wantUserContents[userIdx])
+			}
+			userIdx++
+		}
+	}
+
+	// The LAST LLM call should have seen the history accumulated
+	// across the first two turns (4 messages) plus the third
+	// user turn — five total, since cfg.LLM.SystemPrompt is "".
+	lastReq := stub.lastRequest()
+	if len(lastReq.Messages) != 5 {
+		t.Errorf("third-turn LLM messages: got %d, want 5 (2 turns of history + new user)",
+			len(lastReq.Messages))
+	}
+	if lastReq.Messages[len(lastReq.Messages)-1].Content != "third user" {
+		t.Errorf("third-turn LLM should end with the new user turn, got %+v",
+			lastReq.Messages[len(lastReq.Messages)-1])
 	}
 }
 

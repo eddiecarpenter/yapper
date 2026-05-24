@@ -5,9 +5,11 @@
   "description": "Yapper browser SPA — voice loop modules (dialogue hook, VAD, STT, TTS, LLM client)",
   "type": "module",
   "scripts": {
+    "dev": "vite",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "vite build",
+    "build:tsc": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,json,md}\"",
     "format": "prettier --write \"src/**/*.{ts,tsx,json,md}\""
@@ -23,9 +25,11 @@
     "@testing-library/react": "^16.0.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^6.0.2",
     "jsdom": "^24.1.0",
     "prettier": "^3.3.2",
     "typescript": "^5.5.3",
+    "vite": "^8.0.14",
     "vitest": "^4.1.7"
   }
 }
