@@ -7,6 +7,7 @@ import (
 
 	"github.com/eddiecarpenter/yapper/internal/config"
 	"github.com/eddiecarpenter/yapper/internal/llm"
+	"github.com/eddiecarpenter/yapper/internal/session"
 )
 
 const (
@@ -34,9 +35,9 @@ const (
 // The returned server has not been started — callers run
 // ListenAndServe themselves so signal handling and shutdown remain
 // in the caller's scope.
-func NewServer(cfg *config.Config, client llm.LLMClient) *http.Server {
+func NewServer(cfg *config.Config, client llm.LLMClient, store session.Store) *http.Server {
 	mux := http.NewServeMux()
-	mux.Handle("/ws", NewWebSocketHandler(cfg, client))
+	mux.Handle("/ws", NewWebSocketHandler(cfg, client, store))
 	spa := spaFS()
 	warnIfSPAMissing(spa)
 	mux.Handle("/", newSPAHandler(spa))

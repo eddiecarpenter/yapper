@@ -30,7 +30,15 @@ import (
 	"github.com/eddiecarpenter/yapper/internal/api"
 	"github.com/eddiecarpenter/yapper/internal/config"
 	"github.com/eddiecarpenter/yapper/internal/llm"
+	"github.com/eddiecarpenter/yapper/internal/session"
 )
+
+// sessionEvictInterval is how often the in-memory session.Store
+// scans for expired sessions. One minute is the spike default —
+// well below the configured session TTL (30 minutes) so the
+// upper bound on a session living past its expiry is one
+// interval (60 s), while the goroutine overhead is negligible.
+const sessionEvictInterval = time.Minute
 
 // shutdownTimeout caps the time the server is given to drain
 // in-flight requests after a shutdown signal arrives.
@@ -87,7 +95,16 @@ func runServe(parent context.Context, args []string) error {
 		return fmt.Errorf("init llm client: %w", err)
 	}
 
-	srv := api.NewServer(cfg, llmClient)
+	// Server-side, cookie-keyed conversation history (Feature 17
+	// design plan KD-1). Closed at shutdown so the eviction
+	// goroutine exits cleanly.
+	store := session.NewMemoryStore(
+		time.Duration(cfg.Server.SessionTTLMinutes)*time.Minute,
+		sessionEvictInterval,
+	)
+	defer store.Close()
+
+	srv := api.NewServer(cfg, llmClient, store)
 
 	log.Printf("server starting on %s (llm=%s/%s base_url=%s api_key=%s)",
 		srv.Addr, cfg.LLM.Provider, cfg.LLM.Model, cfg.LLM.BaseURL,
