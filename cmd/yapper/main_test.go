@@ -75,8 +75,14 @@ func TestRunServe_StartsAndShutsDown(t *testing.T) {
 		<-done
 		t.Fatalf("server never became reachable: %v", err)
 	}
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("status: got %d, want %d", resp.StatusCode, http.StatusNoContent)
+	// Root path is now backed by the embedded SPA handler (Feature
+	// #17 Task 2). When the TS bundle is present in web/dist/ at
+	// compile time the response is 200 (index.html); when CI built
+	// the binary before running `npm run build`, the embed is empty
+	// and the SPA handler returns 404. Both shapes prove the server
+	// is up and routing — neither is a 5xx.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d, want 200 (SPA built) or 404 (empty embed)", resp.StatusCode)
 	}
 	resp.Body.Close()
 

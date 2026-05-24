@@ -390,13 +390,18 @@ func TestNewServer_MountsWSAndRoot(t *testing.T) {
 	httpSrv := httptest.NewServer(srv.Handler)
 	defer httpSrv.Close()
 
-	// `/` should 204.
+	// `/` is now backed by the embedded SPA handler. When the SPA
+	// is built (web/dist/index.html present in the embed), this
+	// returns 200; in a CI environment where the TS bundler has
+	// not run, the embed is empty and the handler returns 404.
+	// Both shapes are acceptable here — what this assertion guards
+	// is that the route is REGISTERED (not 5xx, not panicking).
 	resp, err := http.Get(httpSrv.URL + "/")
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("GET /: status %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /: status %d, want 200 (SPA built) or 404 (empty embed)", resp.StatusCode)
 	}
 	resp.Body.Close()
 

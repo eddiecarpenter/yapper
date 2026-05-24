@@ -23,11 +23,13 @@ const (
 // The mux carries two routes:
 //
 //   - GET /ws — WebSocket upgrade, one turn per connection.
-//   - GET /  — 204 No Content. Useful for reverse-proxy health
-//     probes and confirming the binary is up. The embedded SPA
-//     (docs/ARCHITECTURE.md §6.6 `go:embed web/dist`) will live here
-//     in a later Feature; the current Feature ships only the relay
-//     endpoint because the SPA build artefact does not yet exist.
+//   - GET /  — embedded SPA served from `web/dist` (AD-6,
+//     docs/ARCHITECTURE.md §6.6). Unknown deep-link paths fall
+//     back to index.html so client-side routing works without a
+//     reverse proxy. If the SPA was not built before `go build`
+//     ran, a startup-time WARN names the missing index.html and
+//     `/` serves a 404 — but the WebSocket relay continues to
+//     work, which is what backend-only contributors need.
 //
 // The returned server has not been started — callers run
 // ListenAndServe themselves so signal handling and shutdown remain
@@ -35,18 +37,13 @@ const (
 func NewServer(cfg *config.Config, client llm.LLMClient) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("/ws", NewWebSocketHandler(cfg, client))
-	mux.HandleFunc("/", stubRootHandler)
+	spa := spaFS()
+	warnIfSPAMissing(spa)
+	mux.Handle("/", newSPAHandler(spa))
 
 	return &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Server.Port),
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
-}
-
-// stubRootHandler returns 204 No Content for any path that isn't
-// matched by a more specific route on the mux. It exists so reverse
-// proxies and human curls don't see a 404 on the relay's root.
-func stubRootHandler(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
 }
