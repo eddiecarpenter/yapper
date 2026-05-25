@@ -60,6 +60,13 @@ type turnFrame struct {
 	// ignores any value supplied here. Remove in a follow-on
 	// Feature once the migration window closes.
 	History []llm.Message `json:"history,omitempty"`
+
+	// NoThinking, when true, passes enable_thinking:false to the LLM
+	// so chain-of-thought reasoning is suppressed. Useful for voice
+	// assistants where thinking tokens add latency with no benefit.
+	// Omitting the field (or sending false) leaves the server default
+	// in effect (currently: thinking disabled by default).
+	NoThinking *bool `json:"no_thinking,omitempty"`
 }
 
 // tokenFrame is an outbound streaming text chunk.
@@ -248,20 +255,39 @@ func (h *WebSocketHandler) handleTurn(ctx context.Context, conn *websocket.Conn,
 	// would silently no-op against a reaped session.
 	h.store.Touch(sess.ID)
 
-	req := llm.CompletionRequest{
-		Model:    h.cfg.LLM.Model,
-		Messages: buildMessages(h.cfg.LLM.SystemPrompt, sess.History, inbound.Text),
+	// Resolve thinking preference: browser toggle takes precedence;
+	// fall back to server default (thinking off for voice assistant).
+	noThinking := true // server default: thinking disabled
+	if inbound.NoThinking != nil {
+		noThinking = *inbound.NoThinking
 	}
+	enableThinking := !noThinking
+	req := llm.CompletionRequest{
+		Model:          h.cfg.LLM.Model,
+		Messages:       buildMessages(h.cfg.LLM.SystemPrompt, sess.History, inbound.Text),
+		EnableThinking: &enableThinking,
+	}
+
+	// thinkFilter strips Qwen3-style <think>…</think> reasoning blocks
+	// from the token stream before forwarding to the browser. Models that
+	// don't emit these tags pass through unchanged. The filter is
+	// stateful across tokens because a tag boundary may split across
+	// multiple delta chunks.
+	filter := newThinkFilter()
 
 	resp, err := h.client.CompleteStream(ctx, req,
 		func(tok string) {
+			visible := filter.Write(tok)
+			if visible == "" {
+				return
+			}
 			// Token writes are best-effort — if the browser
 			// disconnects mid-stream, the next write fails and the
 			// adapter's ctx-cancellation path takes over. We do not
 			// surface the error here because the handler still needs
 			// to drive the stream to completion (the adapter is
 			// guaranteed to return promptly on ctx.Done()).
-			_ = wsjson.Write(ctx, conn, tokenFrame{Type: tokenFrameType, Text: tok})
+			_ = wsjson.Write(ctx, conn, tokenFrame{Type: tokenFrameType, Text: visible})
 		},
 		nil,
 	)
