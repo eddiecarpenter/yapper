@@ -24,6 +24,13 @@ type CompletionRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
 	Stream   bool      `json:"stream"`
+
+	// EnableThinking controls chain-of-thought reasoning on models that
+	// support it (e.g. Qwen3 via LM Studio). A nil pointer omits the
+	// field entirely so providers that don't recognise it (Ollama,
+	// OpenAI) receive a clean request. Set to false for voice assistants
+	// where thinking tokens add latency with no conversational benefit.
+	EnableThinking *bool `json:"enable_thinking,omitempty"`
 }
 
 // Usage tracks token consumption per completion. The Input / Output
