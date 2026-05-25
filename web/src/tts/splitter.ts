@@ -16,7 +16,7 @@ function isTrailingChar(c: string): boolean {
 
 function getTokenFromBuffer(buffer: string, start: number): string {
   let end = start;
-  while (end < buffer.length && !/\s/.test(buffer[end])) ++end;
+  while (end < buffer.length && !/\s/.test(buffer[end]!)) ++end;
   return buffer.substring(start, end);
 }
 
@@ -100,14 +100,14 @@ function updateStack(c: string, stack: string[], i: number, buffer: string): voi
       c === "'" &&
       i > 0 &&
       i < buffer.length - 1 &&
-      /[A-Za-z]/.test(buffer[i - 1]) &&
-      /[A-Za-z]/.test(buffer[i + 1])
+      /[A-Za-z]/.test(buffer[i - 1]!) &&
+      /[A-Za-z]/.test(buffer[i + 1]!)
     )
       return;
     if (
       c === "'" &&
       i > 0 &&
-      /[A-Za-z]/.test(buffer[i - 1]) &&
+      /[A-Za-z]/.test(buffer[i - 1]!) &&
       (!stack.length || stack.at(-1) !== "'")
     )
       return;
@@ -169,15 +169,15 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
 
     const scanBoundary = (idx: number): { end: number; nextNonSpace: number } => {
       let end = idx;
-      while (end + 1 < len && isSentenceTerminator(buffer[end + 1], false)) ++end;
-      while (end + 1 < len && isTrailingChar(buffer[end + 1])) ++end;
+      while (end + 1 < len && isSentenceTerminator(buffer[end + 1]!, false)) ++end;
+      while (end + 1 < len && isTrailingChar(buffer[end + 1]!)) ++end;
       let nextNonSpace = end + 1;
-      while (nextNonSpace < len && /\s/.test(buffer[nextNonSpace])) ++nextNonSpace;
+      while (nextNonSpace < len && /\s/.test(buffer[nextNonSpace]!)) ++nextNonSpace;
       return { end, nextNonSpace };
     };
 
     while (i < len) {
-      const c = buffer[i];
+      const c = buffer[i]!;
       updateStack(c, stack, i, buffer);
 
       if (stack.length === 0 && isSentenceTerminator(c)) {
@@ -196,7 +196,7 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
         if (nextNonSpace === len) break;
 
         let tokenStart = i - 1;
-        while (tokenStart >= 0 && /\S/.test(buffer[tokenStart])) tokenStart--;
+        while (tokenStart >= 0 && /\S/.test(buffer[tokenStart]!)) tokenStart--;
         tokenStart = Math.max(sentenceStart, tokenStart + 1);
         const token = getTokenFromBuffer(buffer, tokenStart);
         if (!token) {
@@ -219,12 +219,12 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
         if (
           /^([A-Za-z]\.)+$/.test(token) &&
           nextNonSpace < len &&
-          /[A-Z]/.test(buffer[nextNonSpace])
+          /[A-Z]/.test(buffer[nextNonSpace]!)
         ) {
           ++i;
           continue;
         }
-        if (c === "." && nextNonSpace < len && /[a-z]/.test(buffer[nextNonSpace])) {
+        if (c === "." && nextNonSpace < len && /[a-z]/.test(buffer[nextNonSpace]!)) {
           ++i;
           continue;
         }

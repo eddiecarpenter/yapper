@@ -295,7 +295,7 @@ function PushToTalkLoop({
   const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoice, setSelectedVoice] = useState<SpeechSynthesisVoice | null>(null);
   // Supertonic voice — only visible when ONNX pipeline is loaded.
-  const [selectedTTSVoice, setSelectedTTSVoice] = useState<SupertonicVoiceId>(TTS_VOICES[0].id);
+  const [selectedTTSVoice, setSelectedTTSVoice] = useState<SupertonicVoiceId>(TTS_VOICES[0]!.id);
   const [ttsQuality, setTtsQuality] = useState(5); // num_inference_steps 1–50
   const [ttsSpeed, setTtsSpeed] = useState(1.0); // 0.8–1.2x
 

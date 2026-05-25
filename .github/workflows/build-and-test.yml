@@ -66,10 +66,11 @@ jobs:
 
       - name: Create web/dist placeholder
         # go:embed all:dist in web/embed.go requires the dist/ directory to
-        # exist at build time. On CI the web job runs in parallel and has not
-        # produced a real build yet, so we create an empty placeholder so that
-        # go vet / go build / go test can compile the embed package.
-        run: mkdir -p web/dist
+        # exist AND contain at least one embeddable file. On CI the web job
+        # runs in parallel and has not produced a real build yet, so we
+        # create a dotfile placeholder — the `all:` prefix in the embed
+        # directive includes dot-prefixed files, so .gitkeep satisfies it.
+        run: mkdir -p web/dist && touch web/dist/.gitkeep
 
       - name: go vet
         run: go vet ./...
