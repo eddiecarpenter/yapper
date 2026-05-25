@@ -11,4 +11,4 @@
  */
 export type { Speaker } from "./types";
 export { KokoroSpeaker } from "./KokoroSpeaker";
-export type { Provider } from "./KokoroSpeaker";
+export type { Provider, SupertonicVoiceId } from "./KokoroSpeaker";
