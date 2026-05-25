@@ -462,14 +462,21 @@ function PushToTalkLoop({
         // ── Sentence-streaming TTS ─────────────────────────────────
         // Tokens from the LLM are fed into a TextSplitterStream that
         // detects real sentence boundaries (handling abbreviations,
-        // URLs, quotes, etc.). Complete sentences are merged until we
-        // have ≥ 100 chars — matching the Supertonic demo's chunk
-        // sizing — before dispatching to the TTS pipeline. This keeps
-        // chunks large enough for good prosody while still starting
-        // playback well before the LLM finishes.
+        // URLs, quotes, etc.).
+        //
+        // Dispatch strategy — two-threshold to minimise first-word
+        // latency while keeping mid-response chunks large enough for
+        // good prosody:
+        //   • First chunk: dispatch as soon as the very first complete
+        //     sentence arrives, regardless of length. This makes TTS
+        //     start speaking immediately after the first LLM sentence
+        //     rather than waiting for 100 chars to accumulate.
+        //   • Subsequent chunks: merge sentences until ≥ 40 chars so
+        //     the model isn't called with tiny two-word fragments.
         const splitter = new TextSplitterStream();
         let mergeBuffer = ""; // complete sentences waiting to merge
-        const MIN_CHUNK_CHARS = 100;
+        const MIN_CHUNK_CHARS = 40; // minimum for 2nd+ chunks
+        let firstChunkDispatched = false;
         let ttsChain = Promise.resolve() as Promise<void>;
         let ttsStartMs = 0;
         let ttsStarted = false;
@@ -495,14 +502,22 @@ function PushToTalkLoop({
         };
 
         // Drain completed sentences from the splitter into mergeBuffer,
-        // then dispatch once we reach the minimum chunk size.
+        // then dispatch: immediately on the first sentence, or once
+        // ≥ MIN_CHUNK_CHARS have accumulated for subsequent chunks.
         const flushBuffer = (forceAll = false) => {
           // Pull any newly completed sentences out of the splitter.
           while (splitter.sentences.length > 0) {
             const s = splitter.sentences.shift()!;
             mergeBuffer += (mergeBuffer ? " " : "") + s;
           }
-          // Dispatch accumulated text when large enough (or forced at end).
+          // First chunk: fire as soon as any sentence is ready.
+          if (!firstChunkDispatched && mergeBuffer.trim()) {
+            firstChunkDispatched = true;
+            enqueueChunk(mergeBuffer);
+            mergeBuffer = "";
+            return;
+          }
+          // Subsequent chunks: accumulate to MIN_CHUNK_CHARS for prosody.
           while (mergeBuffer.length >= MIN_CHUNK_CHARS) {
             enqueueChunk(mergeBuffer);
             mergeBuffer = "";
