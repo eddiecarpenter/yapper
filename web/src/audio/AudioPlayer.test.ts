@@ -79,11 +79,7 @@ function installAudioContext(): FakeContextState {
     autoEnd: true,
   };
 
-  function makeBuffer(
-    numberOfChannels: number,
-    length: number,
-    sampleRate: number,
-  ): FakeBuffer {
+  function makeBuffer(numberOfChannels: number, length: number, sampleRate: number): FakeBuffer {
     const channels: Float32Array[] = [];
     for (let i = 0; i < numberOfChannels; i++) {
       channels.push(new Float32Array(length));
@@ -131,9 +127,8 @@ function installAudioContext(): FakeContextState {
   class MockAudioContext {
     destination = {};
     close = vi.fn().mockResolvedValue(undefined);
-    createBuffer = vi.fn(
-      (numberOfChannels: number, length: number, sampleRate: number) =>
-        makeBuffer(numberOfChannels, length, sampleRate),
+    createBuffer = vi.fn((numberOfChannels: number, length: number, sampleRate: number) =>
+      makeBuffer(numberOfChannels, length, sampleRate),
     );
     createBufferSource = vi.fn(() => makeSource());
 
@@ -265,9 +260,7 @@ describe("AudioPlayer — concurrent play() rejects (primitive does not queue)",
     await Promise.resolve();
     await Promise.resolve();
 
-    await expect(p.play(new Float32Array(240), 24000)).rejects.toBeInstanceOf(
-      AudioPlayerBusyError,
-    );
+    await expect(p.play(new Float32Array(240), 24000)).rejects.toBeInstanceOf(AudioPlayerBusyError);
 
     // Tear down — fire onended on the first source so the first
     // play() can resolve cleanly (otherwise the test runner times

@@ -122,8 +122,8 @@ func TestBrowserCommand_TableDriven(t *testing.T) {
 		{"darwin", "open", []string{url}},
 		{"linux", "xdg-open", []string{url}},
 		{"windows", "cmd", []string{"/c", "start", "", url}},
-		{"plan9", "", nil},      // unsupported → empty program
-		{"freebsd", "", nil},    // unsupported → empty program
+		{"plan9", "", nil},   // unsupported → empty program
+		{"freebsd", "", nil}, // unsupported → empty program
 	}
 	for _, tc := range cases {
 		t.Run(tc.os, func(t *testing.T) {

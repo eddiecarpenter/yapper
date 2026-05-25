@@ -20,9 +20,4 @@ export {
   SileroVAD,
   TARGET_SAMPLE_RATE_HZ,
 } from "./SileroVAD";
-export type {
-  LoadErrorCause,
-  LoadingState,
-  Provider,
-  SileroVADOptions,
-} from "./SileroVAD";
+export type { LoadErrorCause, LoadingState, Provider, SileroVADOptions } from "./SileroVAD";

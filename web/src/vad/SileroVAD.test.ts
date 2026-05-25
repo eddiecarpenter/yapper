@@ -38,7 +38,7 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("onnxruntime-web/wasm", () => ({}));
+vi.mock("onnxruntime-web/wasm", () => ({ env: { wasm: { wasmPaths: {} } } }));
 
 vi.mock("@ricky0123/vad-web", () => ({
   defaultModelFetcher: mocks.defaultModelFetcher,
@@ -74,9 +74,7 @@ const GPU_SENTINEL: GpuLike = Object.freeze({});
  * index to probability so the test can drive the state machine
  * through a designed sequence.
  */
-function makeFakeModel(
-  probSource: number | ((frameIndex: number) => number) = 0.0,
-): {
+function makeFakeModel(probSource: number | ((frameIndex: number) => number) = 0.0): {
   process: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
   reset_state: ReturnType<typeof vi.fn>;
@@ -444,8 +442,19 @@ describe("SileroVAD — hysteresis state machine", () => {
   it("fires onSpeechEnd after speech run + minSilenceFrames of silence", async () => {
     // 8 speech frames, then 5 silence frames (minSilenceFrames=5).
     const probs = [
-      0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, // 8 speech
-      0.1, 0.1, 0.1, 0.1, 0.1, // 5 silence — triggers end
+      0.9,
+      0.9,
+      0.9,
+      0.9,
+      0.9,
+      0.9,
+      0.9,
+      0.9, // 8 speech
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1, // 5 silence — triggers end
     ];
     const model = makeFakeModel((i) => probs[i] ?? 0.1);
     mocks.sileroNew.mockResolvedValue(model);
@@ -483,9 +492,18 @@ describe("SileroVAD — hysteresis state machine", () => {
     // Pre-roll = 3 for a smaller test. Send 5 silence frames before
     // speech, then enough speech to latch and silence to fire.
     const probs = [
-      0.1, 0.1, 0.1, 0.1, 0.1, // silent pre-roll
-      0.9, 0.9, 0.9, 0.9, // 4 speech — latches at frame 8 (1-indexed)
-      0.1, 0.1, 0.1, // silence — fires onSpeechEnd
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1, // silent pre-roll
+      0.9,
+      0.9,
+      0.9,
+      0.9, // 4 speech — latches at frame 8 (1-indexed)
+      0.1,
+      0.1,
+      0.1, // silence — fires onSpeechEnd
     ];
     const model = makeFakeModel((i) => probs[i] ?? 0.1);
     mocks.sileroNew.mockResolvedValue(model);
@@ -528,10 +546,20 @@ describe("SileroVAD — hysteresis state machine", () => {
     // silenceThreshold 0.35 and speechThreshold 0.5 — leaves counters
     // unchanged), 3 speech frames, then 5 silence frames to fire.
     const probs = [
-      0.9, 0.9, 0.9, 0.9, // latches at frame 4
-      0.45, 0.45, // dead-zone — neither speech nor silence
-      0.9, 0.9, 0.9, // more speech
-      0.1, 0.1, 0.1, 0.1, 0.1, // 5 silence — fires
+      0.9,
+      0.9,
+      0.9,
+      0.9, // latches at frame 4
+      0.45,
+      0.45, // dead-zone — neither speech nor silence
+      0.9,
+      0.9,
+      0.9, // more speech
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1, // 5 silence — fires
     ];
     const model = makeFakeModel((i) => probs[i] ?? 0.1);
     mocks.sileroNew.mockResolvedValue(model);
@@ -559,11 +587,17 @@ describe("SileroVAD — hysteresis state machine", () => {
     // first 3 should be discarded by the silence reset, and the latch
     // happens only after the 4 consecutive speech frames at the end.
     const probs = [
-      0.9, 0.9, 0.9, // 3 speech (below latch threshold)
+      0.9,
+      0.9,
+      0.9, // 3 speech (below latch threshold)
       0.1, // 1 silence — resets speech counter
-      0.9, 0.9, 0.9, // 3 more speech (still below)
+      0.9,
+      0.9,
+      0.9, // 3 more speech (still below)
       0.9, // 4th — latch finally happens here
-      0.1, 0.1, 0.1, // silence — fires
+      0.1,
+      0.1,
+      0.1, // silence — fires
     ];
     const model = makeFakeModel((i) => probs[i] ?? 0.1);
     mocks.sileroNew.mockResolvedValue(model);
@@ -589,10 +623,20 @@ describe("SileroVAD — hysteresis state machine", () => {
 
   it("a buggy onSpeechEnd does not break subsequent process() calls", async () => {
     const probs = [
-      0.9, 0.9, 0.9, 0.9, // latch
-      0.1, 0.1, 0.1, // fires (buggy listener)
-      0.9, 0.9, 0.9, 0.9, // re-latch
-      0.1, 0.1, 0.1, // fires again
+      0.9,
+      0.9,
+      0.9,
+      0.9, // latch
+      0.1,
+      0.1,
+      0.1, // fires (buggy listener)
+      0.9,
+      0.9,
+      0.9,
+      0.9, // re-latch
+      0.1,
+      0.1,
+      0.1, // fires again
     ];
     const model = makeFakeModel((i) => probs[i] ?? 0.1);
     mocks.sileroNew.mockResolvedValue(model);
@@ -689,8 +733,13 @@ describe("SileroVAD — dispose() lifecycle", () => {
 
   it("onSpeechEnd is detached on dispose — late segments do not surprise the consumer", async () => {
     const probs = [
-      0.9, 0.9, 0.9, 0.9, // latch
-      0.1, 0.1, 0.1, // about to fire
+      0.9,
+      0.9,
+      0.9,
+      0.9, // latch
+      0.1,
+      0.1,
+      0.1, // about to fire
     ];
     const model = makeFakeModel((i) => probs[i] ?? 0.1);
     mocks.sileroNew.mockResolvedValue(model);

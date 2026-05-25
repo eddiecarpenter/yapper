@@ -62,9 +62,7 @@ const GPU_SENTINEL: GpuLike = Object.freeze({});
  * `calls` array captures every audio buffer passed in, so Task 3
  * tests can assert the audio plumbing.
  */
-function makeFakePipeline(
-  output: unknown = { text: "" },
-): {
+function makeFakePipeline(output: unknown = { text: "" }): {
   pipeline: (audio: Float32Array) => Promise<unknown>;
   dispose: ReturnType<typeof vi.fn>;
   calls: Float32Array[];
@@ -196,7 +194,7 @@ describe("WhisperTranscriber — lazy model loading + state observable", () => {
     expect(mocks.pipeline).toHaveBeenCalledWith(
       "automatic-speech-recognition",
       WHISPER_MODEL_ID,
-      { device: "wasm" },
+      expect.objectContaining({ device: "wasm" }),
     );
   });
 
@@ -302,9 +300,7 @@ describe("WhisperTranscriber — load error classification", () => {
 
     const t = new WhisperTranscriber();
 
-    await expect(t.transcribe(new Float32Array(0), 16000)).rejects.toThrow(
-      /network unreachable/,
-    );
+    await expect(t.transcribe(new Float32Array(0), 16000)).rejects.toThrow(/network unreachable/);
   });
 
   it("falls back to 'unknown' classification and surfaces the original message", async () => {
@@ -499,10 +495,7 @@ describe("WhisperTranscriber — transcribe() wiring (AC-1)", () => {
     // We do not enable chunking today, but the reducer accepts both
     // shapes so a future tuning task that turns it on does not
     // silently regress the interface return type. Pin the contract.
-    const fake = makeFakePipeline([
-      { text: "Hello" },
-      { text: " world" },
-    ]);
+    const fake = makeFakePipeline([{ text: "Hello" }, { text: " world" }]);
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
     const t = new WhisperTranscriber();
@@ -582,8 +575,6 @@ describe("extractTranscript — output reducer", () => {
 
   it("skips malformed entries in an array output", () => {
     // Mixed valid + invalid entries — invalid contribute "" to the join.
-    expect(
-      extractTranscript([{ text: "a" }, { text: 1 }, { text: "b" }, null]),
-    ).toBe("ab");
+    expect(extractTranscript([{ text: "a" }, { text: 1 }, { text: "b" }, null])).toBe("ab");
   });
 });

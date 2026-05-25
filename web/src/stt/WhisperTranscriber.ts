@@ -96,10 +96,7 @@ function classifyLoadError(err: unknown): LoadErrorCause {
     if (name === "QuotaExceededError" || /quota/i.test(message)) {
       return "quota";
     }
-    if (
-      name === "TypeError" &&
-      /(failed to fetch|network|networkerror)/i.test(message)
-    ) {
+    if (name === "TypeError" && /(failed to fetch|network|networkerror)/i.test(message)) {
       return "network";
     }
   }
@@ -122,16 +119,17 @@ function classifyLoadError(err: unknown): LoadErrorCause {
  * Exported so Task 3's tests can pin the reducer contract directly
  * without round-tripping through the full pipeline mock.
  */
-export function extractTranscript(
-  result: unknown,
-): string {
+export function extractTranscript(result: unknown): string {
   // Array shape (chunked) — concatenate the per-chunk `text` fields in
   // order, then normalise. We do not insert separators because the
   // chunks overlap and the model emits its own spacing.
   if (Array.isArray(result)) {
     const joined = result
       .map((r) =>
-        r !== null && typeof r === "object" && "text" in r && typeof (r as { text: unknown }).text === "string"
+        r !== null &&
+        typeof r === "object" &&
+        "text" in r &&
+        typeof (r as { text: unknown }).text === "string"
           ? (r as { text: string }).text
           : "",
       )
@@ -234,7 +232,7 @@ export class WhisperTranscriber implements Transcriber {
     this.provider = hasWebGPU ? "webgpu" : "wasm";
     // Deterministic single-line log so AC-2 / AC-3 can be verified from
     // the browser console without inspecting internal fields.
-    console.log(`provider: ${this.provider} model: ${this.modelId}`);
+    console.log(`provider: ${this.provider}`);
   }
 
   /**
@@ -388,7 +386,7 @@ export class WhisperTranscriber implements Transcriber {
     //   WASM   — q8 (8-bit quantised) cuts model size and is fast on
     //            CPU; fp32 on WASM would be both large and slow.
     const webgpuDtype = { encoder_model: "fp16", decoder_model_merged: "fp16" } as const;
-    const wasmDtype   = { encoder_model: "q8",   decoder_model_merged: "q8"   } as const;
+    const wasmDtype = { encoder_model: "q8", decoder_model_merged: "q8" } as const;
 
     try {
       const p = await pipeline("automatic-speech-recognition", this.modelId, {

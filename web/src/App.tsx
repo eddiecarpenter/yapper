@@ -32,25 +32,28 @@ type Mode = "vad" | "ptt";
 const TTS_VOICES: Array<{ id: SupertonicVoiceId; label: string; note: string }> = [
   { id: "F1", label: "Female 1", note: "Supertonic F1" },
   { id: "F2", label: "Female 2", note: "Supertonic F2" },
-  { id: "M1", label: "Male 1",   note: "Supertonic M1" },
-  { id: "M2", label: "Male 2",   note: "Supertonic M2" },
+  { id: "M1", label: "Male 1", note: "Supertonic M1" },
+  { id: "M2", label: "Male 2", note: "Supertonic M2" },
 ];
 
 /** Available Whisper models, ordered fastest → most accurate. */
 const WHISPER_MODELS = [
-  { id: "Xenova/whisper-tiny.en",        label: "Tiny",            note: "~150 MB · fastest, lower accuracy" },
-  { id: "Xenova/whisper-base.en",        label: "Base",            note: "~290 MB · fast" },
-  { id: "Xenova/whisper-small.en",       label: "Small",           note: "~490 MB · good balance (recommended)" },
-  { id: "Xenova/whisper-medium.en",      label: "Medium",          note: "~1.5 GB · accurate, slow to download" },
-  { id: "Xenova/whisper-large-v3-turbo", label: "Large v3 Turbo",  note: "~1.6 GB · most accurate, slow to download" },
+  { id: "Xenova/whisper-tiny.en", label: "Tiny", note: "~150 MB · fastest, lower accuracy" },
+  { id: "Xenova/whisper-base.en", label: "Base", note: "~290 MB · fast" },
+  { id: "Xenova/whisper-small.en", label: "Small", note: "~490 MB · good balance (recommended)" },
+  { id: "Xenova/whisper-medium.en", label: "Medium", note: "~1.5 GB · accurate, slow to download" },
+  {
+    id: "Xenova/whisper-large-v3-turbo",
+    label: "Large v3 Turbo",
+    note: "~1.6 GB · most accurate, slow to download",
+  },
 ] as const;
 
 export function App(): JSX.Element {
   const [started, setStarted] = useState(false);
   const [mode, setMode] = useState<Mode>("ptt");
-  const [selectedWhisperModel, setSelectedWhisperModel] = useState<string>(
-    "Xenova/whisper-small.en",
-  );
+  const [selectedWhisperModel, setSelectedWhisperModel] =
+    useState<string>("Xenova/whisper-small.en");
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: "1rem" }}>
@@ -118,10 +121,7 @@ export function App(): JSX.Element {
       )}
       {started ? (
         mode === "ptt" ? (
-          <PushToTalkLoop
-            onStop={() => setStarted(false)}
-            whisperModelId={selectedWhisperModel}
-          />
+          <PushToTalkLoop onStop={() => setStarted(false)} whisperModelId={selectedWhisperModel} />
         ) : (
           <VoiceLoop onStop={() => setStarted(false)} />
         )
@@ -180,21 +180,25 @@ function ModelLoader({ model, label }: { model: Loadable; label: string }): JSX.
 
   if (loadingState === "ready") {
     const badge =
-      provider === "webgpu"  ? { icon: "⚡", text: "WebGPU",     bg: "#d4edda", fg: "#155724" } :
-      provider === "browser" ? { icon: "🌐", text: "Browser TTS", bg: "#fff3cd", fg: "#856404" } :
-                               { icon: "🖥", text: "WASM",        bg: "#e2e3e5", fg: "#383d41" };
+      provider === "webgpu"
+        ? { icon: "⚡", text: "WebGPU", bg: "#d4edda", fg: "#155724" }
+        : provider === "browser"
+          ? { icon: "🌐", text: "Browser TTS", bg: "#fff3cd", fg: "#856404" }
+          : { icon: "🖥", text: "WASM", bg: "#e2e3e5", fg: "#383d41" };
     return (
       <p style={{ margin: "0.25rem 0", fontSize: "0.85rem", color: "#555" }}>
         ✅ {label} ready ·{" "}
-        <span style={{
-          display: "inline-block",
-          padding: "1px 7px",
-          borderRadius: "10px",
-          fontSize: "0.8rem",
-          fontWeight: 600,
-          background: badge.bg,
-          color: badge.fg,
-        }}>
+        <span
+          style={{
+            display: "inline-block",
+            padding: "1px 7px",
+            borderRadius: "10px",
+            fontSize: "0.8rem",
+            fontWeight: 600,
+            background: badge.bg,
+            color: badge.fg,
+          }}
+        >
           {badge.icon} {badge.text}
         </span>
       </p>
@@ -215,16 +219,29 @@ function ModelLoader({ model, label }: { model: Loadable; label: string }): JSX.
         {statusLabel}
       </p>
       {!isError && (
-        <div role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}
-          style={{ height: "6px", borderRadius: "3px", background: "#e0e0e0", overflow: "hidden", width: "260px" }}>
-          <div style={{
-            height: "100%",
+        <div
+          role="progressbar"
+          aria-valuenow={progress}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          style={{
+            height: "6px",
             borderRadius: "3px",
-            background: "#007aff",
-            width: progress > 0 ? `${progress}%` : "100%",
-            animation: progress === 0 ? "indeterminate 1.4s infinite ease-in-out" : undefined,
-            transition: progress > 0 ? "width 0.2s ease" : undefined,
-          }} />
+            background: "#e0e0e0",
+            overflow: "hidden",
+            width: "260px",
+          }}
+        >
+          <div
+            style={{
+              height: "100%",
+              borderRadius: "3px",
+              background: "#007aff",
+              width: progress > 0 ? `${progress}%` : "100%",
+              animation: progress === 0 ? "indeterminate 1.4s infinite ease-in-out" : undefined,
+              transition: progress > 0 ? "width 0.2s ease" : undefined,
+            }}
+          />
         </div>
       )}
       <style>{`
@@ -279,8 +296,8 @@ function PushToTalkLoop({
   const [selectedVoice, setSelectedVoice] = useState<SpeechSynthesisVoice | null>(null);
   // Supertonic voice — only visible when ONNX pipeline is loaded.
   const [selectedTTSVoice, setSelectedTTSVoice] = useState<SupertonicVoiceId>(TTS_VOICES[0].id);
-  const [ttsQuality, setTtsQuality] = useState(5);       // num_inference_steps 1–50
-  const [ttsSpeed, setTtsSpeed] = useState(1.0);         // 0.8–1.2x
+  const [ttsQuality, setTtsQuality] = useState(5); // num_inference_steps 1–50
+  const [ttsSpeed, setTtsSpeed] = useState(1.0); // 0.8–1.2x
 
   // Both models must be ready before the button is enabled.
   const { loadingState: sttState } = useModelLoader(transcriber);
@@ -344,8 +361,12 @@ function PushToTalkLoop({
     speaker.setVoice(selectedTTSVoice);
   }, [speaker, selectedTTSVoice]);
 
-  useEffect(() => { speaker.setNumInferenceSteps(ttsQuality); }, [speaker, ttsQuality]);
-  useEffect(() => { speaker.setSpeed(ttsSpeed); }, [speaker, ttsSpeed]);
+  useEffect(() => {
+    speaker.setNumInferenceSteps(ttsQuality);
+  }, [speaker, ttsQuality]);
+  useEffect(() => {
+    speaker.setSpeed(ttsSpeed);
+  }, [speaker, ttsSpeed]);
 
   /** Phrases that trigger the voice-clear command (case-insensitive, full utterance). */
   const CLEAR_COMMAND =
@@ -406,12 +427,15 @@ function PushToTalkLoop({
         setStatus("Speaking…");
         speaker.warmAudio();
         clearHistory();
-        void speaker.speak("Session cleared.").then(() => {
-          setStatus("✅ Done — hold to talk again");
-        }).catch((err: unknown) => {
-          setError(`TTS error: ${err instanceof Error ? err.message : String(err)}`);
-          setStatus("✅ Done — hold to talk again");
-        });
+        void speaker
+          .speak("Session cleared.")
+          .then(() => {
+            setStatus("✅ Done — hold to talk again");
+          })
+          .catch((err: unknown) => {
+            setError(`TTS error: ${err instanceof Error ? err.message : String(err)}`);
+            setStatus("✅ Done — hold to talk again");
+          });
         return;
       }
 
@@ -444,7 +468,7 @@ function PushToTalkLoop({
         // chunks large enough for good prosody while still starting
         // playback well before the LLM finishes.
         const splitter = new TextSplitterStream();
-        let mergeBuffer = "";         // complete sentences waiting to merge
+        let mergeBuffer = ""; // complete sentences waiting to merge
         const MIN_CHUNK_CHARS = 100;
         let ttsChain = Promise.resolve() as Promise<void>;
         let ttsStartMs = 0;
@@ -506,8 +530,11 @@ function PushToTalkLoop({
 
         ws.onmessage = (ev: MessageEvent<string>) => {
           let frame: { type: string; text?: string; message?: string };
-          try { frame = JSON.parse(ev.data) as typeof frame; }
-          catch { return; }
+          try {
+            frame = JSON.parse(ev.data) as typeof frame;
+          } catch {
+            return;
+          }
 
           if (frame.type === "token" && typeof frame.text === "string") {
             if (firstToken) {
@@ -541,24 +568,22 @@ function PushToTalkLoop({
             });
             ws.close();
             // Wait for the full TTS chain to drain, then stamp timing.
-            ttsChain.then(() => {
-              const ttsMs = ttsStarted
-                ? Math.round(performance.now() - ttsStartMs)
-                : 0;
-              const timing: TurnTiming = { sttMs, ttftMs, llmMs, ttsMs };
-              setHistory((h) => {
-                const updated = h.map((m, i, arr) =>
-                  i === arr.length - 1 && m.role === "assistant"
-                    ? { ...m, timing }
-                    : m
-                );
-                historyRef.current = updated;
-                return updated;
+            ttsChain
+              .then(() => {
+                const ttsMs = ttsStarted ? Math.round(performance.now() - ttsStartMs) : 0;
+                const timing: TurnTiming = { sttMs, ttftMs, llmMs, ttsMs };
+                setHistory((h) => {
+                  const updated = h.map((m, i, arr) =>
+                    i === arr.length - 1 && m.role === "assistant" ? { ...m, timing } : m,
+                  );
+                  historyRef.current = updated;
+                  return updated;
+                });
+                setStatus("✅ Done — hold to talk again");
+              })
+              .catch(() => {
+                setStatus("✅ Done — hold to talk again");
               });
-              setStatus("✅ Done — hold to talk again");
-            }).catch(() => {
-              setStatus("✅ Done — hold to talk again");
-            });
             resolve();
           } else if (frame.type === "error" && typeof frame.message === "string") {
             ws.close();
@@ -582,7 +607,9 @@ function PushToTalkLoop({
 
   return (
     <section>
-      <p><strong>Status:</strong> {status}</p>
+      <p>
+        <strong>Status:</strong> {status}
+      </p>
       {error && (
         <p style={{ color: "#a00" }} role="alert">
           ⚠ {error}
@@ -593,7 +620,15 @@ function PushToTalkLoop({
       <ModelLoader model={speaker} label="Voice synthesis" />
       {/* Supertonic controls — shown when ONNX pipeline is loaded. */}
       {ttsState === "ready" && speaker.getProvider() !== "browser" && (
-        <div style={{ margin: "0.25rem 0 0.5rem", fontSize: "0.9rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+        <div
+          style={{
+            margin: "0.25rem 0 0.5rem",
+            fontSize: "0.9rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.4rem",
+          }}
+        >
           {/* Voice */}
           <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <span style={{ minWidth: "4.5rem", fontWeight: 600 }}>Voice:</span>
@@ -603,7 +638,9 @@ function PushToTalkLoop({
               style={{ fontSize: "0.9rem", padding: "2px 4px" }}
             >
               {TTS_VOICES.map((v) => (
-                <option key={v.id} value={v.id}>{v.label}</option>
+                <option key={v.id} value={v.id}>
+                  {v.label}
+                </option>
               ))}
             </select>
           </label>
@@ -612,7 +649,10 @@ function PushToTalkLoop({
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <span style={{ minWidth: "4.5rem", fontWeight: 600 }}>Quality:</span>
             <input
-              type="range" min={1} max={50} step={1}
+              type="range"
+              min={1}
+              max={50}
+              step={1}
               value={ttsQuality}
               onChange={(e) => setTtsQuality(parseInt(e.target.value))}
               style={{ width: "120px", accentColor: "#007aff" }}
@@ -625,7 +665,10 @@ function PushToTalkLoop({
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <span style={{ minWidth: "4.5rem", fontWeight: 600 }}>Speed:</span>
             <input
-              type="range" min={0.8} max={1.2} step={0.01}
+              type="range"
+              min={0.8}
+              max={1.2}
+              step={0.01}
               value={ttsSpeed}
               onChange={(e) => setTtsSpeed(parseFloat(e.target.value))}
               style={{ width: "120px", accentColor: "#007aff" }}
@@ -634,7 +677,17 @@ function PushToTalkLoop({
           </div>
         </div>
       )}
-      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: "0.5rem 0", fontSize: "0.9rem", cursor: "pointer", userSelect: "none" }}>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.5rem",
+          margin: "0.5rem 0",
+          fontSize: "0.9rem",
+          cursor: "pointer",
+          userSelect: "none",
+        }}
+      >
         <input
           type="checkbox"
           checked={noThinking}
@@ -642,11 +695,21 @@ function PushToTalkLoop({
         />
         <span>No thinking</span>
         <span style={{ color: "#888", fontSize: "0.8rem" }}>
-          {noThinking ? "(faster — skips chain-of-thought)" : "(slower — model reasons before answering)"}
+          {noThinking
+            ? "(faster — skips chain-of-thought)"
+            : "(slower — model reasons before answering)"}
         </span>
       </label>
       {ttsState === "ready" && speaker.getProvider() === "browser" && browserVoices.length > 0 && (
-        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: "0.25rem 0", fontSize: "0.9rem" }}>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            margin: "0.25rem 0",
+            fontSize: "0.9rem",
+          }}
+        >
           <span>Voice:</span>
           <select
             value={selectedVoice?.name ?? ""}
@@ -658,7 +721,8 @@ function PushToTalkLoop({
           >
             {browserVoices.map((v) => (
               <option key={v.name} value={v.name}>
-                {v.name} ({v.lang}){v.name.includes("Premium") ? " ★" : v.name.includes("Enhanced") ? " ✓" : ""}
+                {v.name} ({v.lang})
+                {v.name.includes("Premium") ? " ★" : v.name.includes("Enhanced") ? " ✓" : ""}
               </option>
             ))}
           </select>
@@ -670,17 +734,20 @@ function PushToTalkLoop({
           disabled={!modelReady}
           onMouseDown={modelReady ? startRecording : undefined}
           onMouseUp={modelReady ? () => void stopRecording() : undefined}
-          onTouchStart={modelReady ? (e) => { e.preventDefault(); startRecording(); } : undefined}
+          onTouchStart={
+            modelReady
+              ? (e) => {
+                  e.preventDefault();
+                  startRecording();
+                }
+              : undefined
+          }
           onTouchEnd={modelReady ? () => void stopRecording() : undefined}
           style={{
             padding: "1rem 2rem",
             fontSize: "1.1rem",
             cursor: modelReady ? "pointer" : "not-allowed",
-            background: !modelReady
-              ? "#aaa"
-              : recording
-                ? "#c00"
-                : "#007aff",
+            background: !modelReady ? "#aaa" : recording ? "#c00" : "#007aff",
             color: "#fff",
             border: "none",
             borderRadius: "8px",
@@ -712,13 +779,16 @@ function PushToTalkLoop({
           Stop
         </button>
       </div>
-      <Transcript history={history} onReplay={(text) => {
-        speaker.cancel();
-        speaker.warmAudio();
-        void speaker.speak(text).catch((err: unknown) => {
-          setError(`TTS error: ${err instanceof Error ? err.message : String(err)}`);
-        });
-      }} />
+      <Transcript
+        history={history}
+        onReplay={(text) => {
+          speaker.cancel();
+          speaker.warmAudio();
+          void speaker.speak(text).catch((err: unknown) => {
+            setError(`TTS error: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }}
+      />
     </section>
   );
 }
@@ -830,14 +900,16 @@ function Transcript({
             </button>
           )}
           {m.timing && (
-            <span style={{
-              display: "inline-flex",
-              gap: "0.6rem",
-              marginLeft: "0.5rem",
-              fontSize: "0.75rem",
-              color: "#888",
-              fontVariantNumeric: "tabular-nums",
-            }}>
+            <span
+              style={{
+                display: "inline-flex",
+                gap: "0.6rem",
+                marginLeft: "0.5rem",
+                fontSize: "0.75rem",
+                color: "#888",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
               <span title="Speech-to-text">🎙 {m.timing.sttMs} ms</span>
               <span title="Time to first token">⚡ {m.timing.ttftMs} ms</span>
               <span title="Total LLM time">🤖 {m.timing.llmMs} ms</span>

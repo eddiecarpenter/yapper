@@ -438,9 +438,7 @@ describe("MicrophoneCapture — start() failure paths", () => {
     await expect(mic.start()).rejects.toThrow(/hardware busy/);
     // Should NOT be re-wrapped in MicPermissionDeniedError — the
     // pipeline layer distinguishes the two.
-    await expect(mic.start().catch((e) => e)).resolves.not.toBeInstanceOf(
-      MicPermissionDeniedError,
-    );
+    await expect(mic.start().catch((e) => e)).resolves.not.toBeInstanceOf(MicPermissionDeniedError);
   });
 });
 
@@ -517,7 +515,9 @@ describe("MicrophoneCapture — dispose() lifecycle", () => {
 
     // The handler reference is still callable — but the production
     // close-out cleared `this.onFrame`, so no delivery happens.
-    handler?.(new MessageEvent("message", { data: { type: "frame", frame: new Float32Array(512) } }));
+    handler?.(
+      new MessageEvent("message", { data: { type: "frame", frame: new Float32Array(512) } }),
+    );
     expect(seen).toHaveLength(0);
   });
 

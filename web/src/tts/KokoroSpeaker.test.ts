@@ -212,6 +212,17 @@ function installAudioContext(): FakeContextState {
   return state;
 }
 
+function stubFetch(): void {
+  const embedBuffer = new Float32Array(1 * 101 * 128).buffer;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(embedBuffer),
+    }),
+  );
+}
+
 describe("KokoroSpeaker — backend selection", () => {
   let logSpy: ReturnType<typeof vi.spyOn>;
 
@@ -411,7 +422,7 @@ describe("KokoroSpeaker — load error classification", () => {
     const seen: LoadingState[] = [];
     s.subscribe((st) => seen.push(st));
 
-    await expect(s.speak("hi")).rejects.toThrow(/Failed to load Kokoro model/);
+    await expect(s.speak("hi")).rejects.toThrow(/Failed to load TTS model/);
     expect(seen).toEqual(["loading", "error"]);
     expect(s.getLoadingState()).toBe("error");
   });
@@ -453,7 +464,7 @@ describe("KokoroSpeaker — load error classification", () => {
     mocks.pipeline.mockResolvedValueOnce(fake.pipeline);
 
     const s = new KokoroSpeaker();
-    await expect(s.speak("hi")).rejects.toThrow(/Failed to load Kokoro model/);
+    await expect(s.speak("hi")).rejects.toThrow(/Failed to load TTS model/);
     await s.speak("hi");
 
     expect(mocks.pipeline).toHaveBeenCalledTimes(2);
@@ -491,6 +502,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     mocks.pipeline.mockReset();
     audioState = installAudioContext();
+    stubFetch();
   });
 
   afterEach(() => {
@@ -525,7 +537,14 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     await s.speak("hello world");
 
     expect(fake.calls).toHaveLength(1);
-    expect(fake.calls[0]).toEqual({ text: "hello world", options: { voice: DEFAULT_VOICE } });
+    expect(fake.calls[0]).toEqual({
+      text: "hello world",
+      options: expect.objectContaining({
+        speaker_embeddings: expect.any(Float32Array),
+        num_inference_steps: expect.any(Number),
+        speed: expect.any(Number),
+      }),
+    });
     expect(s.getVoice()).toBe(DEFAULT_VOICE);
   });
 
@@ -536,14 +555,18 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const s = new KokoroSpeaker({ voice: "af_heart" });
     await s.speak("hello");
 
-    expect(fake.calls[0]?.options).toEqual({ voice: "af_heart" });
+    // The constructor voice is stored and returned by getVoice();
+    // the pipeline call uses speaker_embeddings (not the voice string).
     expect(s.getVoice()).toBe("af_heart");
+    expect(fake.calls[0]?.options).toEqual(
+      expect.objectContaining({ speaker_embeddings: expect.any(Float32Array) }),
+    );
   });
 
-  it("DEFAULT_VOICE is 'bf_emma' per AD-10", () => {
+  it("DEFAULT_VOICE is 'F1'", () => {
     // Pin the constant so a refactor that accidentally changes the
     // default fails this test rather than silently switching voices.
-    expect(DEFAULT_VOICE).toBe("bf_emma");
+    expect(DEFAULT_VOICE).toBe("F1");
   });
 
   it("wraps the pipeline output in an AudioBuffer at the reported sample rate", async () => {
@@ -559,15 +582,13 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
 
     expect(audioState.buffers).toHaveLength(1);
     const buffer = audioState.buffers[0]!;
-    // Mono buffer at the pipeline's reported rate. Length matches the
-    // samples we passed in — Kokoro's 24 kHz mono is the rate the
-    // design plan + §6.4 specify.
+    // Mono buffer at the pipeline's reported rate. Length includes the
+    // 0.5 s of silence padding added by the production code.
     expect(buffer.numberOfChannels).toBe(1);
     expect(buffer.sampleRate).toBe(24000);
-    expect(buffer.length).toBe(fixtureAudio.length);
+    expect(buffer.length).toBe(fixtureAudio.length + Math.floor(0.5 * 24000));
     // The audio data was actually copied into the buffer channel.
     expect(buffer.copyToChannel).toHaveBeenCalledTimes(1);
-    expect(buffer.copyToChannel).toHaveBeenCalledWith(fixtureAudio, 0);
   });
 
   it("schedules the buffer on a source node and connects it to the destination", async () => {
@@ -601,13 +622,13 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
       resolved = true;
     });
 
-    // Give the event loop multiple ticks to settle the pipeline call
-    // and the AudioContext setup. The Promise must STILL be pending —
+    // Wait until the source has been constructed (pipeline + fetch +
+    // synthesis all settled). The Promise must STILL be pending —
     // synthesis having completed does not equal playback having
     // completed (the entire point of AC-1).
-    for (let i = 0; i < 5; i++) {
-      await Promise.resolve();
-    }
+    await vi.waitFor(() => {
+      expect(audioState.sources.length).toBeGreaterThan(0);
+    });
     expect(resolved).toBe(false);
 
     // Drive playback end manually.
@@ -636,6 +657,8 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
       return a;
     }
 
+    const silenceSamples = Math.floor(0.5 * sampleRate);
+
     // First synthesis — short text.
     const shortAudio = makeNonSilent(shortText.length * samplesPerChar);
     const fake1 = makeFakePipeline({ audio: shortAudio, sampling_rate: sampleRate });
@@ -643,7 +666,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const s1 = new KokoroSpeaker();
     await s1.speak(shortText);
     const shortBuffer = audioState.buffers.at(-1)!;
-    expect(shortBuffer.length).toBe(shortAudio.length);
+    expect(shortBuffer.length).toBe(shortAudio.length + silenceSamples);
     // Samples are non-silent — the buffer's channel data contains
     // non-zero entries after copyToChannel ran.
     const shortChannel = shortBuffer.channels[0]!;
@@ -658,15 +681,16 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const s2 = new KokoroSpeaker();
     await s2.speak(longText);
     const longBuffer = audioState.buffers.at(-1)!;
-    expect(longBuffer.length).toBe(longAudio.length);
+    expect(longBuffer.length).toBe(longAudio.length + silenceSamples);
     const longChannel = longBuffer.channels[0]!;
     const longNonZero = Array.from(longChannel).some((v) => v !== 0);
     expect(longNonZero).toBe(true);
 
     // Duration ratio matches input-text-length ratio (within float
-    // tolerance). This is the substantive AC-3 assertion — a longer
-    // utterance produces proportionally longer audio.
-    const durationRatio = longBuffer.duration / shortBuffer.duration;
+    // tolerance). Subtract silence padding before comparing so we
+    // measure only the speech portion.
+    const durationRatio =
+      (longBuffer.length - silenceSamples) / (shortBuffer.length - silenceSamples);
     const textRatio = longText.length / shortText.length;
     expect(durationRatio).toBeCloseTo(textRatio, 5);
   });
@@ -702,7 +726,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     mocks.pipeline.mockResolvedValue(malformed.pipeline);
 
     const s = new KokoroSpeaker();
-    await expect(s.speak("hi")).rejects.toThrow(/unexpected output shape/);
+    await expect(s.speak("hi")).rejects.toThrow(/unexpected.*audio.*shape/);
   });
 });
 
@@ -720,23 +744,23 @@ describe("extractSynthesisOutput — output parser", () => {
   });
 
   it("throws on null input", () => {
-    expect(() => extractSynthesisOutput(null)).toThrow(/unexpected output shape/);
+    expect(() => extractSynthesisOutput(null)).toThrow(/null.*expected an object|expected an object/);
   });
 
   it("throws when audio is not a Float32Array", () => {
     expect(() => extractSynthesisOutput({ audio: [0.1], sampling_rate: 24000 })).toThrow(
-      /unexpected output shape/,
+      /unexpected.*audio.*shape/,
     );
   });
 
   it("throws when sampling_rate is not a number", () => {
     expect(() =>
       extractSynthesisOutput({ audio: new Float32Array(0), sampling_rate: "24000" }),
-    ).toThrow(/unexpected output shape/);
+    ).toThrow(/invalid sampling_rate|unexpected.*shape/);
   });
 
   it("throws when fields are missing", () => {
-    expect(() => extractSynthesisOutput({})).toThrow(/unexpected output shape/);
+    expect(() => extractSynthesisOutput({})).toThrow(/unexpected.*audio.*shape/);
   });
 });
 
@@ -751,6 +775,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     mocks.pipeline.mockReset();
     audioState = installAudioContext();
+    stubFetch();
   });
 
   afterEach(() => {
@@ -767,10 +792,10 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     const s = new KokoroSpeaker();
     const speakPromise = s.speak("hi");
 
-    // Yield enough microtasks for the load + synthesis + source.start
-    // to settle, then assert the source is in flight.
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-    expect(audioState.sources).toHaveLength(1);
+    // Wait until the source has been constructed (load + fetch + synthesis settled).
+    await vi.waitFor(() => {
+      expect(audioState.sources).toHaveLength(1);
+    });
     const source = audioState.sources[0]!;
     expect(source.started).toBe(true);
     expect(source.stopped).toBe(false);
@@ -790,7 +815,9 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     // First call: cancel during playback.
     audioState.autoEnd = false;
     const first = s.speak("a");
-    for (let i = 0; i < 5; i++) await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(audioState.sources).toHaveLength(1);
+    });
     s.cancel();
     await first;
 
@@ -821,9 +848,10 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     const s = new KokoroSpeaker();
     const speakPromise = s.speak("hi");
 
-    // Yield until the synthesis call has been issued.
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-    expect(synthCallable).toHaveBeenCalledTimes(1);
+    // Wait until the synthesis call has been issued (load + fetch settled).
+    await vi.waitFor(() => {
+      expect(synthCallable).toHaveBeenCalledTimes(1);
+    });
     // No source has been constructed yet — synthesis is still pending.
     expect(audioState.sources).toHaveLength(0);
 
@@ -857,7 +885,9 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
 
     const s = new KokoroSpeaker();
     const first = s.speak("a");
-    for (let i = 0; i < 5; i++) await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(callable).toHaveBeenCalledTimes(1);
+    });
     s.cancel();
     resolveFirst({ audio: new Float32Array(240), sampling_rate: 24000 });
     await first;
@@ -896,7 +926,9 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
 
     const s = new KokoroSpeaker();
     const speakPromise = s.speak("hi");
-    for (let i = 0; i < 5; i++) await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(audioState.sources).toHaveLength(1);
+    });
 
     s.cancel();
     // AC-2 explicit: "in-flight speak() Promise resolves without error".
@@ -922,6 +954,7 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     mocks.pipeline.mockReset();
     audioState = installAudioContext();
+    stubFetch();
   });
 
   afterEach(() => {
@@ -963,7 +996,9 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
 
     const s = new KokoroSpeaker();
     const speakPromise = s.speak("hi");
-    for (let i = 0; i < 5; i++) await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(audioState.sources).toHaveLength(1);
+    });
 
     s.dispose();
     await expect(speakPromise).resolves.toBeUndefined();

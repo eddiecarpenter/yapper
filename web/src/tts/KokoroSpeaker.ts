@@ -64,7 +64,11 @@ export function extractSynthesisOutput(result: unknown): SynthesisOutput {
   let rateCandidate: unknown = r["sampling_rate"];
 
   // Tensor-like: { data: Float32Array, ... }
-  if (audioCandidate !== undefined && typeof audioCandidate === "object" && audioCandidate !== null) {
+  if (
+    audioCandidate !== undefined &&
+    typeof audioCandidate === "object" &&
+    audioCandidate !== null
+  ) {
     const maybeData = (audioCandidate as Record<string, unknown>)["data"];
     if (maybeData instanceof Float32Array) {
       audioCandidate = maybeData;
@@ -97,7 +101,8 @@ function classifyLoadError(err: unknown): LoadErrorCause {
     const name = err.name;
     const message = err.message ?? "";
     if (name === "QuotaExceededError" || /quota/i.test(message)) return "quota";
-    if (name === "TypeError" && /(failed to fetch|network|networkerror)/i.test(message)) return "network";
+    if (name === "TypeError" && /(failed to fetch|network|networkerror)/i.test(message))
+      return "network";
   }
   return "unknown";
 }
@@ -105,9 +110,12 @@ function classifyLoadError(err: unknown): LoadErrorCause {
 function loadErrorMessage(cause: LoadErrorCause, err: unknown): string {
   const original = err instanceof Error ? err.message : String(err);
   switch (cause) {
-    case "quota":   return `Failed to load TTS model: browser storage quota exceeded (${original})`;
-    case "network": return `Failed to load TTS model: network unreachable (${original})`;
-    case "unknown": return `Failed to load TTS model: ${original}`;
+    case "quota":
+      return `Failed to load TTS model: browser storage quota exceeded (${original})`;
+    case "network":
+      return `Failed to load TTS model: network unreachable (${original})`;
+    case "unknown":
+      return `Failed to load TTS model: ${original}`;
   }
 }
 
@@ -153,13 +161,21 @@ export class KokoroSpeaker implements Speaker {
     // fallback for browsers without WebGPU support.
     this.provider = hasWebGPU ? "webgpu" : "wasm";
     this.voice = options.voice ?? DEFAULT_VOICE;
-    console.log(`tts provider: ${this.provider} model: ${KOKORO_MODEL_ID}`);
+    console.log(`provider: ${this.provider}`);
   }
 
-  getProvider(): Provider { return this.provider; }
-  getVoice(): string { return this.voice; }
-  getLoadingState(): LoadingState { return this.loadingState; }
-  getError(): string | null { return this.lastError; }
+  getProvider(): Provider {
+    return this.provider;
+  }
+  getVoice(): string {
+    return this.voice;
+  }
+  getLoadingState(): LoadingState {
+    return this.loadingState;
+  }
+  getError(): string | null {
+    return this.lastError;
+  }
 
   /**
    * Switch the active Supertonic voice. The embedding for the new voice is
@@ -185,14 +201,20 @@ export class KokoroSpeaker implements Speaker {
 
   subscribe(listener: (state: LoadingState) => void): () => void {
     this.listeners.add(listener);
-    return () => { this.listeners.delete(listener); };
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   private setState(next: LoadingState): void {
     if (this.loadingState === next) return;
     this.loadingState = next;
     for (const listener of this.listeners) {
-      try { listener(next); } catch { /* best-effort */ }
+      try {
+        listener(next);
+      } catch {
+        /* best-effort */
+      }
     }
   }
 
@@ -206,9 +228,8 @@ export class KokoroSpeaker implements Speaker {
 
   private async _buildPipeline(): Promise<TtsPipeline> {
     // Try WebGPU first (fast — GPU shader execution); fall back to WASM.
-    const attempts: Array<"webgpu" | "wasm"> = this.provider === "webgpu"
-      ? ["webgpu", "wasm"]
-      : ["wasm"];
+    const attempts: Array<"webgpu" | "wasm"> =
+      this.provider === "webgpu" ? ["webgpu", "wasm"] : ["wasm"];
 
     let lastErr: unknown;
     for (const device of attempts) {
@@ -224,17 +245,20 @@ export class KokoroSpeaker implements Speaker {
         if (device === "webgpu") {
           console.log("[TTS] warming up WebGPU shaders…");
           try {
-            await (p as unknown as (
-              text: string,
-              opts: { speaker_embeddings: Float32Array; num_inference_steps: number; speed: number }
-            ) => Promise<unknown>)(
-              "Hello",
-              {
-                speaker_embeddings: new Float32Array(1 * 101 * 128),
-                num_inference_steps: 1,
-                speed: 1.0,
-              }
-            );
+            await (
+              p as unknown as (
+                text: string,
+                opts: {
+                  speaker_embeddings: Float32Array;
+                  num_inference_steps: number;
+                  speed: number;
+                },
+              ) => Promise<unknown>
+            )("Hello", {
+              speaker_embeddings: new Float32Array(1 * 101 * 128),
+              num_inference_steps: 1,
+              speed: 1.0,
+            });
             console.log("[TTS] warm-up done");
           } catch (warmErr) {
             // Warm-up failure is non-fatal — real synthesis may still work.
@@ -245,7 +269,9 @@ export class KokoroSpeaker implements Speaker {
         this.setState("ready");
         return p;
       } catch (err: unknown) {
-        console.warn(`[KokoroSpeaker] ${device} pipeline failed: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(
+          `[KokoroSpeaker] ${device} pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
         lastErr = err;
         if (device === "webgpu") {
           // Downgrade and retry on WASM.
@@ -321,7 +347,7 @@ export class KokoroSpeaker implements Speaker {
           speaker_embeddings: Float32Array;
           num_inference_steps: number;
           speed: number;
-        }
+        },
       ) => Promise<unknown>
     )(text, {
       speaker_embeddings,
@@ -432,7 +458,11 @@ export class KokoroSpeaker implements Speaker {
     const source = this.activeSource;
     if (source !== null) {
       this.activeSource = null;
-      try { source.stop(); } catch { /* defensive */ }
+      try {
+        source.stop();
+      } catch {
+        /* defensive */
+      }
     }
   }
 
@@ -442,7 +472,11 @@ export class KokoroSpeaker implements Speaker {
 
     if (this.pipelinePromise !== null) {
       const promise = this.pipelinePromise;
-      promise.then((p) => { p.dispose().catch(() => undefined); }).catch(() => undefined);
+      promise
+        .then((p) => {
+          p.dispose().catch(() => undefined);
+        })
+        .catch(() => undefined);
       this.pipelinePromise = null;
     }
 
@@ -452,7 +486,9 @@ export class KokoroSpeaker implements Speaker {
       try {
         const r = ctx.close();
         if (r && typeof r.catch === "function") r.catch(() => undefined);
-      } catch { /* defensive */ }
+      } catch {
+        /* defensive */
+      }
     }
 
     this.usingBrowserTTS = false;
