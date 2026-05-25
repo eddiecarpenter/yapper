@@ -21,8 +21,8 @@ const (
 	DefaultServerPort        = 8080
 	DefaultSessionTTLMinutes = 30
 	DefaultLLMProvider       = "openai_compat"
-	DefaultLLMBaseURL        = "http://localhost:11434/v1"
-	DefaultLLMModel          = "llama3.2:3b"
+	DefaultLLMBaseURL        = "http://localhost:1234/v1"
+	DefaultLLMModel          = "google/gemma-3-12b"
 	DefaultLLMStream         = true
 	DefaultContextBudget     = 4096
 	DefaultSystemPrompt      = "You are Yapper, a helpful voice assistant. Be concise."

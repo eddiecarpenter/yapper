@@ -61,7 +61,7 @@ type AsrPipeline = Awaited<ReturnType<typeof pipeline<"automatic-speech-recognit
 
 /** Model id pinned by AD-11. Kept module-local so tests do not have to
  *  hard-code the same string in two places. */
-export const WHISPER_MODEL_ID = "Xenova/whisper-base.en";
+export const WHISPER_MODEL_ID = "Xenova/whisper-medium.en";
 
 /** Sample rate the Transcriber accepts. The audio module is responsible
  *  for resampling upstream per `docs/ARCHITECTURE.md` §6.3, so a
@@ -164,14 +164,23 @@ function loadErrorMessage(cause: LoadErrorCause, err: unknown): string {
   }
 }
 
+/**
+ * Per-file download progress tracked by the Transformers.js progress
+ * callback. Keyed by file name so we can compute an aggregate percentage
+ * across all model artefacts as they arrive sequentially.
+ */
+type FileProgress = { loaded: number; total: number };
+
 export class WhisperTranscriber implements Transcriber {
   private readonly provider: Provider;
+  /** The model ID this instance was constructed with. */
+  private readonly modelId: string;
   /**
    * Cached construction promise. Null until the first call to
-   * `transcribe()`. Holding the promise (rather than the resolved
-   * pipeline) means a second call that arrives while the first load
-   * is still in flight piggy-backs on the same fetch — no double
-   * download of the 145 MB model.
+   * `transcribe()` or `preload()`. Holding the promise (rather than
+   * the resolved pipeline) means a second call that arrives while the
+   * first load is still in flight piggy-backs on the same fetch — no
+   * double download of the 145 MB model.
    */
   private pipelinePromise: Promise<AsrPipeline> | null = null;
   private loadingState: LoadingState = "idle";
@@ -182,6 +191,15 @@ export class WhisperTranscriber implements Transcriber {
    * way to detach a listener from outside the class.
    */
   private readonly listeners: Set<(state: LoadingState) => void> = new Set();
+
+  /**
+   * Per-file download progress, updated from the Transformers.js
+   * progress_callback. Used to derive `downloadProgress` (0–100).
+   */
+  private readonly fileProgress = new Map<string, FileProgress>();
+  /** Aggregate download progress (0–100). Notified to subscribers. */
+  private downloadProgress = 0;
+  private readonly progressListeners: Set<(pct: number) => void> = new Set();
 
   /**
    * Probes `navigator.gpu` synchronously and pins the provider for the
@@ -195,7 +213,13 @@ export class WhisperTranscriber implements Transcriber {
    * The ASR pipeline is deliberately NOT instantiated here — see
    * `transcribe()` for the lazy-load gate.
    */
-  constructor() {
+  /**
+   * @param modelId - HuggingFace model ID to use (defaults to
+   *   `WHISPER_MODEL_ID`). Pass a different value to let the user
+   *   choose a smaller/larger model at runtime.
+   */
+  constructor(modelId: string = WHISPER_MODEL_ID) {
+    this.modelId = modelId;
     // `navigator.gpu` is the WebGPU entry point per the W3C WebGPU spec.
     // It is undefined in browsers without WebGPU and in jsdom (the test
     // environment), so the wasm-fallback branch is the natural default
@@ -210,7 +234,7 @@ export class WhisperTranscriber implements Transcriber {
     this.provider = hasWebGPU ? "webgpu" : "wasm";
     // Deterministic single-line log so AC-2 / AC-3 can be verified from
     // the browser console without inspecting internal fields.
-    console.log(`provider: ${this.provider}`);
+    console.log(`provider: ${this.provider} model: ${this.modelId}`);
   }
 
   /**
@@ -245,6 +269,41 @@ export class WhisperTranscriber implements Transcriber {
   }
 
   /**
+   * Current aggregate download progress, 0–100. Meaningful only when
+   * `getLoadingState()` is `"loading"`.
+   */
+  getProgress(): number {
+    return this.downloadProgress;
+  }
+
+  /**
+   * Subscribe to download-progress updates (0–100). Fires on every chunk
+   * received from the Transformers.js progress callback — typically many
+   * times per second during the initial model fetch.
+   *
+   * Returns an unsubscribe function compatible with `useEffect` cleanup.
+   */
+  subscribeProgress(listener: (pct: number) => void): () => void {
+    this.progressListeners.add(listener);
+    return () => {
+      this.progressListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Eagerly trigger the model download and compilation so the pipeline
+   * is warm before the first `transcribe()` call. Safe to call multiple
+   * times — the underlying promise is cached, so concurrent / repeated
+   * calls all piggy-back on the same load.
+   *
+   * Errors are swallowed here (they will surface again on the next
+   * `transcribe()` call via the same rejected promise logic).
+   */
+  preload(): void {
+    void this.loadPipeline().catch(() => undefined);
+  }
+
+  /**
    * Apply a state transition: store the new value and notify every
    * subscriber. Subscriber callbacks are wrapped in try/catch so a
    * single buggy listener cannot prevent the rest from being notified;
@@ -264,34 +323,142 @@ export class WhisperTranscriber implements Transcriber {
   }
 
   /**
+   * Update aggregate download progress from a single file's progress
+   * report and notify subscribers. We keep a running sum of bytes
+   * across all files seen so far — this means the percentage climbs
+   * monotonically even as new files start downloading.
+   */
+  private handleProgress(file: string, loaded: number, total: number): void {
+    this.fileProgress.set(file, { loaded, total });
+    let totalLoaded = 0;
+    let totalBytes = 0;
+    for (const fp of this.fileProgress.values()) {
+      totalLoaded += fp.loaded;
+      totalBytes += fp.total;
+    }
+    const pct = totalBytes > 0 ? Math.round((totalLoaded / totalBytes) * 100) : 0;
+    if (pct === this.downloadProgress) return;
+    this.downloadProgress = pct;
+    for (const listener of this.progressListeners) {
+      try {
+        listener(pct);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
+  /**
+   * Internal helper that actually calls the Transformers.js `pipeline()`
+   * factory with the selected device, with a transparent WebGPU → WASM
+   * fallback when the browser's WebGPU implementation rejects the model
+   * (e.g. Safari Metal backend missing a required op).
+   *
+   * On total failure: clears `pipelinePromise`, sets state to `"error"`,
+   * and throws a classified error.
+   */
+  private async _buildPipeline(): Promise<AsrPipeline> {
+    // Transformers.js progress_callback shape — we only care about the
+    // "download" / "progress" statuses that carry loaded/total bytes.
+    type ProgressEvent = {
+      status: string;
+      file?: string;
+      loaded?: number;
+      total?: number;
+    };
+
+    const progressCallback = (event: ProgressEvent): void => {
+      if (
+        (event.status === "download" || event.status === "progress") &&
+        event.file !== undefined &&
+        typeof event.loaded === "number" &&
+        typeof event.total === "number" &&
+        event.total > 0
+      ) {
+        this.handleProgress(event.file, event.loaded, event.total);
+      }
+    };
+
+    // Dtype selection:
+    //   WebGPU — fp16 (half-precision) is natively fast on Metal/Vulkan
+    //            and halves the memory footprint vs fp32. Using fp16 for
+    //            both encoder and the merged decoder avoids the
+    //            "dtype not specified, using fp32" warning and gives
+    //            a real speed improvement on Apple Silicon.
+    //   WASM   — q8 (8-bit quantised) cuts model size and is fast on
+    //            CPU; fp32 on WASM would be both large and slow.
+    const webgpuDtype = { encoder_model: "fp16", decoder_model_merged: "fp16" } as const;
+    const wasmDtype   = { encoder_model: "q8",   decoder_model_merged: "q8"   } as const;
+
+    try {
+      const p = await pipeline("automatic-speech-recognition", this.modelId, {
+        device: this.provider,
+        dtype: this.provider === "webgpu" ? webgpuDtype : wasmDtype,
+        progress_callback: progressCallback,
+      });
+      this.setState("ready");
+      return p;
+    } catch (webgpuErr: unknown) {
+      if (this.provider === "webgpu") {
+        // Transparent fallback: Safari (and other partial WebGPU
+        // implementations) may expose navigator.gpu but fail on individual
+        // ONNX ops at model-load time. Retry with WASM before surfacing an
+        // error so the app still works even if WebGPU is broken.
+        console.warn(
+          `[WhisperTranscriber] WebGPU pipeline failed (${webgpuErr instanceof Error ? webgpuErr.message : String(webgpuErr)}); falling back to WASM`,
+        );
+        // Downgrade the in-memory provider so getProvider() and logs reflect
+        // the actual active backend for the rest of the session.
+        (this as unknown as { provider: Provider }).provider = "wasm";
+        console.log("provider: wasm (WebGPU fallback)");
+        // Reset progress state so the WASM download is tracked cleanly.
+        this.fileProgress.clear();
+        this.downloadProgress = 0;
+        try {
+          const p = await pipeline("automatic-speech-recognition", this.modelId, {
+            device: "wasm",
+            dtype: wasmDtype,
+            progress_callback: progressCallback,
+          });
+          this.setState("ready");
+          return p;
+        } catch (wasmErr: unknown) {
+          // Both providers failed — fall through to the classified error.
+          this.pipelinePromise = null;
+          this.setState("error");
+          const cause = classifyLoadError(wasmErr);
+          throw new Error(loadErrorMessage(cause, wasmErr));
+        }
+      }
+      // Non-WebGPU failure (WASM selected from the start).
+      this.pipelinePromise = null;
+      this.setState("error");
+      const cause = classifyLoadError(webgpuErr);
+      throw new Error(loadErrorMessage(cause, webgpuErr));
+    }
+  }
+
+  /**
    * Lazy-load the ASR pipeline. The first call kicks off the
    * `pipeline(...)` factory call (which fetches and caches the model
    * in IndexedDB); subsequent calls reuse the cached promise. A failure
    * during construction transitions state to `"error"`, clears the
    * cached promise (so a retry can be attempted later), and re-throws
    * a classified error.
+   *
+   * WebGPU → WASM fallback: if the selected provider is `"webgpu"` and
+   * the pipeline construction fails (e.g. unsupported op on Safari's
+   * Metal backend, shader compile error), we transparently retry with
+   * `"wasm"` and log a warning. This lets Safari users try WebGPU first
+   * without ending up in a broken state when the browser's WebGPU
+   * implementation doesn't yet support all the ops Whisper needs.
    */
   private loadPipeline(): Promise<AsrPipeline> {
     if (this.pipelinePromise !== null) {
       return this.pipelinePromise;
     }
     this.setState("loading");
-    this.pipelinePromise = pipeline("automatic-speech-recognition", WHISPER_MODEL_ID, {
-      device: this.provider,
-    })
-      .then((p) => {
-        this.setState("ready");
-        return p;
-      })
-      .catch((err: unknown) => {
-        // On failure we drop the cached promise — without this, a retry
-        // would resolve immediately to the rejection, with no way to
-        // attempt the network/storage operation again.
-        this.pipelinePromise = null;
-        this.setState("error");
-        const cause = classifyLoadError(err);
-        throw new Error(loadErrorMessage(cause, err));
-      });
+    this.pipelinePromise = this._buildPipeline();
     return this.pipelinePromise;
   }
 
@@ -361,6 +528,9 @@ export class WhisperTranscriber implements Transcriber {
       this.pipelinePromise = null;
     }
     this.listeners.clear();
+    this.progressListeners.clear();
+    this.fileProgress.clear();
+    this.downloadProgress = 0;
     this.loadingState = "idle";
   }
 }
