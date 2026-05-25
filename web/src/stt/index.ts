@@ -10,4 +10,4 @@
  */
 export type { Transcriber } from "./types";
 export { WhisperTranscriber } from "./WhisperTranscriber";
-export type { Provider } from "./WhisperTranscriber";
+export type { Provider, LoadingState } from "./WhisperTranscriber";

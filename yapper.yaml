@@ -1,0 +1,3 @@
+llm:
+  base_url: http://localhost:1234/v1
+  model: google/gemma-3-12b
