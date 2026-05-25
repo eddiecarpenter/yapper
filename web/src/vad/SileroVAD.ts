@@ -52,6 +52,11 @@ import * as ort from "onnxruntime-web/wasm";
 
 import type { VAD } from "./types";
 
+// Tell onnxruntime-web where to find its WASM/MJS binaries.
+// By default ORT resolves them relative to the JS bundle (inside
+// assets/) but we serve them from the root alongside the ONNX model.
+ort.env.wasm.wasmPaths = "/";
+
 /**
  * Provider taxonomy — same shape as `WhisperTranscriber` /
  * `KokoroSpeaker` so a future cross-module UI surface can render the
