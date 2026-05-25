@@ -1,0 +1,127 @@
+# Build and Test — runs on every PR targeting main and every push to main.
+# Two parallel jobs: Go (build · vet · fmt · test) and Web (format · typecheck · test · build).
+#
+# Adapted from the ocs-testbench build-and-test workflow.
+# Integration tests (build tag: integration) are skipped here — add a
+# separate lane when a container runtime is available.
+name: Build and Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same PR/branch when a newer commit lands.
+concurrency:
+  group: build-and-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ── Go: build · vet · fmt · test ───────────────────────────────────────────
+  go:
+    name: Go (build · vet · fmt · test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # .agents/ is the agentic framework mount — gitignored at runtime,
+          # not needed for CI.
+          submodules: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "::error::go.mod / go.sum drifted — run 'go mod tidy' locally and commit"
+            git --no-pager diff go.mod go.sum
+            exit 1
+          fi
+
+      - name: gofmt
+        run: |
+          # Exclude .agents/ (the agentic framework mount, gitignored at
+          # runtime — present locally after 'gh agentic mount', absent on CI).
+          out=$(find . -type d -name .agents -prune -o -name '*.go' -print0 \
+                  | xargs -0 gofmt -l)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload Go coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage.out
+          retention-days: 14
+
+  # ── Web: format · typecheck · test · build ─────────────────────────────────
+  web:
+    name: Web (format · typecheck · test · build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install (npm ci — strict to lockfile)
+        run: npm ci
+
+      - name: Format check (prettier)
+        run: npm run format:check
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+      - name: Build (vite production bundle)
+        run: npm run build
+
+      - name: Upload web build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 14
