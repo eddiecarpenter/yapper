@@ -16,15 +16,61 @@ function isTrailingChar(c: string): boolean {
 
 function getTokenFromBuffer(buffer: string, start: number): string {
   let end = start;
-  while (end < buffer.length && !/\s/.test(buffer[end])) ++end;
+  while (end < buffer.length && !/\s/.test(buffer[end]!)) ++end;
   return buffer.substring(start, end);
 }
 
 const ABBREVIATIONS: Set<string> = new Set([
-  "mr","mrs","ms","dr","prof","sr","jr","sgt","col","gen","rep","sen","gov",
-  "lt","maj","capt","st","mt","etc","co","inc","ltd","dept","vs","p","pg",
-  "jan","feb","mar","apr","jun","jul","aug","sep","sept","oct","nov","dec",
-  "sun","mon","tu","tue","tues","wed","th","thu","thur","thurs","fri","sat",
+  "mr",
+  "mrs",
+  "ms",
+  "dr",
+  "prof",
+  "sr",
+  "jr",
+  "sgt",
+  "col",
+  "gen",
+  "rep",
+  "sen",
+  "gov",
+  "lt",
+  "maj",
+  "capt",
+  "st",
+  "mt",
+  "etc",
+  "co",
+  "inc",
+  "ltd",
+  "dept",
+  "vs",
+  "p",
+  "pg",
+  "jan",
+  "feb",
+  "mar",
+  "apr",
+  "jun",
+  "jul",
+  "aug",
+  "sep",
+  "sept",
+  "oct",
+  "nov",
+  "dec",
+  "sun",
+  "mon",
+  "tu",
+  "tue",
+  "tues",
+  "wed",
+  "th",
+  "thu",
+  "thur",
+  "thurs",
+  "fri",
+  "sat",
 ]);
 
 function isAbbreviation(token: string): boolean {
@@ -33,22 +79,50 @@ function isAbbreviation(token: string): boolean {
 }
 
 const MATCHING: Map<string, string> = new Map([
-  [")", "("],["}", "{"],["}", "{"],
-  ["》","《"],["〉","〈"],["›","‹"],["»","«"],["」","「"],["』","『"],["〕","〔"],["】","【"],
+  [")", "("],
+  ["}", "{"],
+  ["}", "{"],
+  ["》", "《"],
+  ["〉", "〈"],
+  ["›", "‹"],
+  ["»", "«"],
+  ["」", "「"],
+  ["』", "『"],
+  ["〕", "〔"],
+  ["】", "【"],
 ]);
 
 const OPENING: Set<string> = new Set(MATCHING.values());
 
 function updateStack(c: string, stack: string[], i: number, buffer: string): void {
   if (c === '"' || c === "'") {
-    if (c === "'" && i > 0 && i < buffer.length - 1 &&
-        /[A-Za-z]/.test(buffer[i - 1]) && /[A-Za-z]/.test(buffer[i + 1])) return;
-    if (c === "'" && i > 0 && /[A-Za-z]/.test(buffer[i - 1]) && (!stack.length || stack.at(-1) !== "'")) return;
+    if (
+      c === "'" &&
+      i > 0 &&
+      i < buffer.length - 1 &&
+      /[A-Za-z]/.test(buffer[i - 1]!) &&
+      /[A-Za-z]/.test(buffer[i + 1]!)
+    )
+      return;
+    if (
+      c === "'" &&
+      i > 0 &&
+      /[A-Za-z]/.test(buffer[i - 1]!) &&
+      (!stack.length || stack.at(-1) !== "'")
+    )
+      return;
     const stackIndex = stack.lastIndexOf(c);
-    if (stackIndex !== -1) { stack.splice(stackIndex); } else { stack.push(c); }
+    if (stackIndex !== -1) {
+      stack.splice(stackIndex);
+    } else {
+      stack.push(c);
+    }
     return;
   }
-  if (OPENING.has(c)) { stack.push(c); return; }
+  if (OPENING.has(c)) {
+    stack.push(c);
+    return;
+  }
   const expectedOpening = MATCHING.get(c);
   if (expectedOpening && stack.length && stack.at(-1) === expectedOpening) stack.pop();
 }
@@ -60,7 +134,10 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
   private _closed: boolean = false;
 
   push(...texts: string[]): void {
-    for (const txt of texts) { this._buffer += txt; this._process(); }
+    for (const txt of texts) {
+      this._buffer += txt;
+      this._process();
+    }
   }
 
   close(): void {
@@ -77,7 +154,10 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
   }
 
   private _resolve(): void {
-    if (this._resolver) { this._resolver(); this._resolver = null; }
+    if (this._resolver) {
+      this._resolver();
+      this._resolver = null;
+    }
   }
 
   private _process(): void {
@@ -89,44 +169,71 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
 
     const scanBoundary = (idx: number): { end: number; nextNonSpace: number } => {
       let end = idx;
-      while (end + 1 < len && isSentenceTerminator(buffer[end + 1], false)) ++end;
-      while (end + 1 < len && isTrailingChar(buffer[end + 1])) ++end;
+      while (end + 1 < len && isSentenceTerminator(buffer[end + 1]!, false)) ++end;
+      while (end + 1 < len && isTrailingChar(buffer[end + 1]!)) ++end;
       let nextNonSpace = end + 1;
-      while (nextNonSpace < len && /\s/.test(buffer[nextNonSpace])) ++nextNonSpace;
+      while (nextNonSpace < len && /\s/.test(buffer[nextNonSpace]!)) ++nextNonSpace;
       return { end, nextNonSpace };
     };
 
     while (i < len) {
-      const c = buffer[i];
+      const c = buffer[i]!;
       updateStack(c, stack, i, buffer);
 
       if (stack.length === 0 && isSentenceTerminator(c)) {
         const currentSegment = buffer.slice(sentenceStart, i);
-        if (/(^|\n)\d+$/.test(currentSegment)) { ++i; continue; }
+        if (/(^|\n)\d+$/.test(currentSegment)) {
+          ++i;
+          continue;
+        }
 
         const { end: boundaryEnd, nextNonSpace } = scanBoundary(i);
 
-        if (i === nextNonSpace - 1 && c !== "\n") { ++i; continue; }
+        if (i === nextNonSpace - 1 && c !== "\n") {
+          ++i;
+          continue;
+        }
         if (nextNonSpace === len) break;
 
         let tokenStart = i - 1;
-        while (tokenStart >= 0 && /\S/.test(buffer[tokenStart])) tokenStart--;
+        while (tokenStart >= 0 && /\S/.test(buffer[tokenStart]!)) tokenStart--;
         tokenStart = Math.max(sentenceStart, tokenStart + 1);
         const token = getTokenFromBuffer(buffer, tokenStart);
-        if (!token) { ++i; continue; }
+        if (!token) {
+          ++i;
+          continue;
+        }
 
-        if ((/https?[,:]\/\//.test(token) || token.includes("@")) &&
-            token.at(-1) && !isSentenceTerminator(token.at(-1)!)) {
-          i = tokenStart + token.length; continue;
+        if (
+          (/https?[,:]\/\//.test(token) || token.includes("@")) &&
+          token.at(-1) &&
+          !isSentenceTerminator(token.at(-1)!)
+        ) {
+          i = tokenStart + token.length;
+          continue;
         }
-        if (isAbbreviation(token)) { ++i; continue; }
-        if (/^([A-Za-z]\.)+$/.test(token) && nextNonSpace < len && /[A-Z]/.test(buffer[nextNonSpace])) {
-          ++i; continue;
+        if (isAbbreviation(token)) {
+          ++i;
+          continue;
         }
-        if (c === "." && nextNonSpace < len && /[a-z]/.test(buffer[nextNonSpace])) { ++i; continue; }
+        if (
+          /^([A-Za-z]\.)+$/.test(token) &&
+          nextNonSpace < len &&
+          /[A-Z]/.test(buffer[nextNonSpace]!)
+        ) {
+          ++i;
+          continue;
+        }
+        if (c === "." && nextNonSpace < len && /[a-z]/.test(buffer[nextNonSpace]!)) {
+          ++i;
+          continue;
+        }
 
         const sentence = buffer.substring(sentenceStart, boundaryEnd + 1).trim();
-        if (sentence === "..." || sentence === "…") { ++i; continue; }
+        if (sentence === "..." || sentence === "…") {
+          ++i;
+          continue;
+        }
 
         if (sentence) this._sentences.push(sentence);
         i = sentenceStart = boundaryEnd + 1;
@@ -147,7 +254,9 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
       } else if (this._closed) {
         break;
       } else {
-        await new Promise<void>((resolve) => { this._resolver = resolve; });
+        await new Promise<void>((resolve) => {
+          this._resolver = resolve;
+        });
       }
     }
   }
@@ -159,7 +268,9 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
     return iterator;
   }
 
-  get sentences(): string[] { return this._sentences; }
+  get sentences(): string[] {
+    return this._sentences;
+  }
 }
 
 export function split(text: string): string[] {

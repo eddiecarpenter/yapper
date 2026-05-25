@@ -57,12 +57,7 @@ import type { VAD } from "../vad/types";
  *                            failure, etc.). `getError()` returns the
  *                            underlying message for UI display.
  */
-export type PipelineState =
-  | "idle"
-  | "starting"
-  | "running"
-  | "permission-denied"
-  | "error";
+export type PipelineState = "idle" | "starting" | "running" | "permission-denied" | "error";
 
 /**
  * Public surface of the composed pipeline. The SPA's wiring code
@@ -131,8 +126,7 @@ export async function createAudioPipeline(
   options: CreateAudioPipelineOptions,
 ): Promise<AudioPipeline> {
   const vad = options.vad;
-  let microphone: MicrophoneCapture =
-    options.microphone ?? new MicrophoneCapture();
+  let microphone: MicrophoneCapture = options.microphone ?? new MicrophoneCapture();
 
   let state: PipelineState = "idle";
   let lastError: string | null = null;

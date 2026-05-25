@@ -32,11 +32,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  type AudioPipeline,
-  type PipelineState,
-  createAudioPipeline,
-} from "./createAudioPipeline";
+import { type AudioPipeline, type PipelineState, createAudioPipeline } from "./createAudioPipeline";
 import { MicPermissionDeniedError, MicrophoneCapture } from "./MicrophoneCapture";
 
 import type { VAD } from "../vad/types";
@@ -61,9 +57,7 @@ type StubMic = {
   onFrame: ((frame: Float32Array) => void) | null;
 };
 
-function makeStubMic(
-  startImpl: () => Promise<void> = async () => undefined,
-): StubMic {
+function makeStubMic(startImpl: () => Promise<void> = async () => undefined): StubMic {
   const mic: StubMic = {
     onFrame: null,
     start: vi.fn(startImpl),
@@ -77,9 +71,7 @@ type StubVad = VAD & {
   dispose: ReturnType<typeof vi.fn>;
 };
 
-function makeStubVad(
-  processImpl: (frame: Float32Array) => boolean = () => false,
-): StubVad {
+function makeStubVad(processImpl: (frame: Float32Array) => boolean = () => false): StubVad {
   const vad: StubVad = {
     process: vi.fn(processImpl),
     dispose: vi.fn((): void => undefined),
