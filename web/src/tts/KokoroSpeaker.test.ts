@@ -744,7 +744,9 @@ describe("extractSynthesisOutput — output parser", () => {
   });
 
   it("throws on null input", () => {
-    expect(() => extractSynthesisOutput(null)).toThrow(/null.*expected an object|expected an object/);
+    expect(() => extractSynthesisOutput(null)).toThrow(
+      /null.*expected an object|expected an object/,
+    );
   });
 
   it("throws when audio is not a Float32Array", () => {
