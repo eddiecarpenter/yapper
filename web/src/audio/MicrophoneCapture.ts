@@ -25,7 +25,7 @@
  * ## Module shape
  *
  * Mirrors the established pattern of `WhisperTranscriber.ts` and
- * `KokoroSpeaker.ts` (small focused public surface, pinned constants,
+ * `SupertonicSpeaker.ts` (small focused public surface, pinned constants,
  * barrel re-export) but is NOT model-backed — so there is no
  * `LoadingState` observable here. The pipeline-level
  * `createAudioPipeline` (Task 4) is the appropriate place to surface
@@ -248,7 +248,7 @@ export class MicrophoneCapture {
             // Best-effort — never let a buggy frame handler tear down
             // the capture pipeline. Matches the resilience pattern
             // applied to subscriber callbacks in `WhisperTranscriber`
-            // / `KokoroSpeaker`.
+            // / `SupertonicSpeaker`.
           }
         }
       }

@@ -25,7 +25,12 @@ const (
 	DefaultLLMModel          = "google/gemma-3-12b"
 	DefaultLLMStream         = true
 	DefaultContextBudget     = 4096
-	DefaultSystemPrompt      = "You are Yapper, a helpful voice assistant. Be concise."
+	DefaultSystemPrompt = "You are Yapper, a helpful voice assistant. " +
+		"Your responses are converted directly to speech, so write for the ear, not the eye. " +
+		"Never use markdown — no headings, no bullet points, no bold, no italics, no code fences, no numbered lists. " +
+		"Use plain prose with natural spoken phrasing. Keep responses concise and conversational. " +
+		"Never use contractions — write 'I am' not 'I'm', 'do not' not 'don't', 'it is' not 'it's', and so on. " +
+		"Contractions cause the text-to-speech engine to mispronounce words."
 )
 
 // Environment variable names used to override YAML-derived values.
@@ -55,6 +60,13 @@ type LLMConfig struct {
 	Stream        bool   `yaml:"stream"`
 	ContextBudget int    `yaml:"context_budget"`
 	SystemPrompt  string `yaml:"system_prompt"`
+
+	// StopSequences, when non-empty, are forwarded to the LLM as stop
+	// tokens. Useful for models that emit special delimiters (e.g.
+	// "<turn|>") that signal internal turn boundaries — adding the
+	// token here prevents the model from roleplaying beyond its first
+	// response.
+	StopSequences []string `yaml:"stop_sequences,omitempty"`
 
 	APIKey string `yaml:"-"`
 }

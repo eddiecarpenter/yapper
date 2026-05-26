@@ -1,5 +1,5 @@
 /**
- * `KokoroSpeaker` — browser-side `Speaker` backed by Supertonic-TTS
+ * `SupertonicSpeaker` — browser-side `Speaker` backed by Supertonic-TTS
  * running via Transformers.js + ONNX Web on WebGPU (with WASM fallback).
  *
  * Model: onnx-community/Supertonic-TTS-ONNX
@@ -24,10 +24,10 @@ export type LoadingState = "idle" | "loading" | "ready" | "error";
 type TtsPipeline = Awaited<ReturnType<typeof pipeline<"text-to-speech">>>;
 
 /** Model identifier on HuggingFace. */
-export const KOKORO_MODEL_ID = "onnx-community/Supertonic-TTS-ONNX";
+export const SUPERTONIC_MODEL_ID = "onnx-community/Supertonic-TTS-ONNX";
 
 /** Base URL for pre-built speaker embedding binaries. */
-const VOICES_BASE_URL = `https://huggingface.co/${KOKORO_MODEL_ID}/resolve/main/voices/`;
+const VOICES_BASE_URL = `https://huggingface.co/${SUPERTONIC_MODEL_ID}/resolve/main/voices/`;
 
 /** Available Supertonic voices — Float32Array binaries, shape 1×101×128. */
 export const SUPERTONIC_VOICES = {
@@ -119,11 +119,11 @@ function loadErrorMessage(cause: LoadErrorCause, err: unknown): string {
   }
 }
 
-export interface KokoroSpeakerOptions {
+export interface SupertonicSpeakerOptions {
   voice?: string;
 }
 
-export class KokoroSpeaker implements Speaker {
+export class SupertonicSpeaker implements Speaker {
   private provider: Provider;
   private readonly voice: string;
 
@@ -138,8 +138,10 @@ export class KokoroSpeaker implements Speaker {
    *  doesn't re-download a previously loaded embedding. */
   private readonly embeddingsCache: Map<string, Float32Array> = new Map();
 
-  /** Number of diffusion inference steps (quality). Higher = slower + better. */
-  private numInferenceSteps = 5;
+  /** Number of diffusion inference steps (quality). Higher = slower + better.
+   *  Default 1 for minimum synthesis latency — fast enough that audio starts
+   *  before the LLM finishes streaming even short responses. */
+  private numInferenceSteps = 1;
   /** Playback speed multiplier. */
   private speed = 1.0;
 
@@ -152,7 +154,7 @@ export class KokoroSpeaker implements Speaker {
   private activeResolver: (() => void) | null = null;
   private activeAborted = false;
 
-  constructor(options: KokoroSpeakerOptions = {}) {
+  constructor(options: SupertonicSpeakerOptions = {}) {
     const hasWebGPU =
       typeof navigator !== "undefined" &&
       ((navigator as unknown as { gpu?: unknown }).gpu ?? null) !== null;
@@ -236,7 +238,7 @@ export class KokoroSpeaker implements Speaker {
       try {
         // No dtype override needed — Transformers.js picks optimal defaults
         // for the device (matches the official demo's pipeline() call).
-        const p = await pipeline("text-to-speech", KOKORO_MODEL_ID, { device });
+        const p = await pipeline("text-to-speech", SUPERTONIC_MODEL_ID, { device });
         this.provider = device;
         console.log(`tts: loaded on ${device}`);
 
@@ -266,11 +268,21 @@ export class KokoroSpeaker implements Speaker {
           }
         }
 
+        // Preload the default voice embedding so the first speak() call
+        // doesn't stall on a HuggingFace network fetch. The ~51 KB .bin
+        // file is fetched and cached here; subsequent calls return instantly
+        // from the in-memory embeddingsCache.
+        console.log("[TTS] preloading default voice embedding…");
+        this.loadEmbeddings(this.voiceId).then(
+          () => console.log("[TTS] voice embedding ready"),
+          (e: unknown) => console.warn("[TTS] voice embedding preload failed (non-fatal):", e),
+        );
+
         this.setState("ready");
         return p;
       } catch (err: unknown) {
         console.warn(
-          `[KokoroSpeaker] ${device} pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
+          `[SupertonicSpeaker] ${device} pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
         );
         lastErr = err;
         if (device === "webgpu") {
@@ -282,7 +294,7 @@ export class KokoroSpeaker implements Speaker {
 
     // Both ONNX paths failed — fall back to Web Speech API.
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      console.warn("[KokoroSpeaker] ONNX unavailable; falling back to Web Speech API");
+      console.warn("[SupertonicSpeaker] ONNX unavailable; falling back to Web Speech API");
       this.provider = "browser";
       this.usingBrowserTTS = true;
       this.setState("ready");
@@ -322,22 +334,21 @@ export class KokoroSpeaker implements Speaker {
     return this.audioContext;
   }
 
-  async speak(text: string): Promise<void> {
-    if (text.trim() === "") return;
-
-    this.activeAborted = false;
-
-    if (this.usingBrowserTTS) {
-      return this.speakWithBrowserTTS(text);
-    }
+  /**
+   * Run ONNX inference for `text` and return the raw audio data.
+   * Returns `null` if the speaker is using browser TTS (no pre-synthesis
+   * available) or if aborted before synthesis completed.
+   *
+   * Callers can start synthesis early (while the previous chunk is still
+   * playing) and hand the result to `playAudioData()` when ready.
+   */
+  async synthesize(text: string): Promise<{ audio: Float32Array; samplingRate: number } | null> {
+    if (text.trim() === "") return null;
+    if (this.usingBrowserTTS) return null;
 
     const tts = await this.loadPipeline();
+    if (this.usingBrowserTTS) return null;
 
-    if (this.usingBrowserTTS) {
-      return this.speakWithBrowserTTS(text);
-    }
-
-    // Load the selected voice's embeddings (cached after first fetch).
     const speaker_embeddings = await this.loadEmbeddings(this.voiceId);
 
     const rawResult = await (
@@ -355,26 +366,36 @@ export class KokoroSpeaker implements Speaker {
       speed: this.speed,
     });
 
+    if (this.activeAborted) return null;
+
+    const { audio: rawAudio, sampling_rate } = extractSynthesisOutput(rawResult);
+
+    // Pad with 0.5 s of silence at the end for natural inter-sentence pacing.
+    const silenceSamples = Math.floor(0.5 * sampling_rate);
+    const audio = new Float32Array(rawAudio.length + silenceSamples);
+    audio.set(rawAudio);
+
+    return { audio, samplingRate: sampling_rate };
+  }
+
+  /**
+   * Play a pre-synthesised audio buffer through the Web Audio API.
+   * Returns a promise that resolves when playback (including the silence
+   * padding already baked into `data.audio`) completes.
+   */
+  async playAudioData(data: { audio: Float32Array; samplingRate: number }): Promise<void> {
     if (this.activeAborted) {
       this.activeAborted = false;
       return;
     }
-
-    const { audio: rawAudio, sampling_rate } = extractSynthesisOutput(rawResult);
-
-    // Pad with 0.5 s of silence between spoken chunks for natural pacing
-    // (matches the Supertonic demo's inter-chunk silence behaviour).
-    const silenceSamples = Math.floor(0.5 * sampling_rate);
-    const audio = new Float32Array(rawAudio.length + silenceSamples);
-    audio.set(rawAudio);
 
     const ctx = this.ensureAudioContext();
     if (ctx.state === "suspended") {
       await ctx.resume();
     }
 
-    const buffer = ctx.createBuffer(1, audio.length, sampling_rate);
-    buffer.copyToChannel(audio as Float32Array<ArrayBuffer>, 0);
+    const buffer = ctx.createBuffer(1, data.audio.length, data.samplingRate);
+    buffer.copyToChannel(data.audio as Float32Array<ArrayBuffer>, 0);
 
     const source = ctx.createBufferSource();
     source.buffer = buffer;
@@ -390,6 +411,19 @@ export class KokoroSpeaker implements Speaker {
       };
       source.start();
     });
+  }
+
+  async speak(text: string): Promise<void> {
+    if (text.trim() === "") return;
+    this.activeAborted = false;
+
+    if (this.usingBrowserTTS) {
+      return this.speakWithBrowserTTS(text);
+    }
+
+    const data = await this.synthesize(text);
+    if (data === null) return;
+    return this.playAudioData(data);
   }
 
   static getBrowserVoices(): SpeechSynthesisVoice[] {
@@ -412,7 +446,7 @@ export class KokoroSpeaker implements Speaker {
     return new Promise<void>((resolve) => {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
-      const voice = this.browserVoice ?? KokoroSpeaker.getBrowserVoices()[0] ?? null;
+      const voice = this.browserVoice ?? SupertonicSpeaker.getBrowserVoices()[0] ?? null;
       if (voice) utterance.voice = voice;
       utterance.rate = 1.0;
       this.activeUtterance = utterance;
@@ -434,6 +468,17 @@ export class KokoroSpeaker implements Speaker {
     if (ctx.state === "suspended") {
       void ctx.resume();
     }
+  }
+
+  /**
+   * Call at the start of each new TTS turn (before the first `synthesize()`
+   * call) to clear the abort flag that `cancel()` sets. Without this,
+   * synthesis results from the new turn are silently discarded if `cancel()`
+   * was called just before (e.g. by `startRecording()` to stop previous
+   * speech).
+   */
+  beginTurn(): void {
+    this.activeAborted = false;
   }
 
   cancel(): void {

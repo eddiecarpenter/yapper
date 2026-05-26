@@ -10,7 +10,7 @@
  *
  * The Design Plan calls for per-instance Provider selection
  * (WebGPU when available, WASM otherwise) mirroring
- * `WhisperTranscriber`/`KokoroSpeaker`. After integration we
+ * `WhisperTranscriber`/`SupertonicSpeaker`. After integration we
  * confirmed that `@ricky0123/vad-web` binds to the `onnxruntime-web/wasm`
  * subpath — the library cannot run on WebGPU regardless of caller
  * preference. R2 in the Design Plan anticipates this: "do NOT silently
@@ -23,7 +23,7 @@
  *   - `getProvider()` returns the ACTUAL runtime in use — currently
  *     always `"wasm"`. A console.log emits the standard
  *     `provider: wasm` line so the dialogue-loop log convention from
- *     `WhisperTranscriber` and `KokoroSpeaker` is preserved.
+ *     `WhisperTranscriber` and `SupertonicSpeaker` is preserved.
  *   - `getPreferredProvider()` returns what the constructor selected
  *     so a future UI surface can show "WebGPU requested, WASM in use"
  *     when the gap matters to the user.
@@ -59,7 +59,7 @@ ort.env.wasm.wasmPaths = "/";
 
 /**
  * Provider taxonomy — same shape as `WhisperTranscriber` /
- * `KokoroSpeaker` so a future cross-module UI surface can render the
+ * `SupertonicSpeaker` so a future cross-module UI surface can render the
  * active backend uniformly.
  */
 export type Provider = "webgpu" | "wasm";
@@ -73,7 +73,7 @@ export type LoadingState = "idle" | "loading" | "ready" | "error";
 
 /**
  * Coarse classification of model-load failures. Mirrors
- * `WhisperTranscriber`/`KokoroSpeaker` so UI code branching on the
+ * `WhisperTranscriber`/`SupertonicSpeaker` so UI code branching on the
  * cause does not have to know which module produced the error.
  *
  *   - `network` — `fetch` for the model bytes failed (offline,
@@ -283,7 +283,7 @@ export class SileroVAD implements VAD {
   private inflightTail: Promise<void> = Promise.resolve();
 
   constructor(options: SileroVADOptions = {}) {
-    // Provider preference — same probe as Whisper / Kokoro. We do NOT
+    // Provider preference — same probe as Whisper / Supertonic. We do NOT
     // ALWAYS just trust the caller-supplied preference: if they ask
     // for webgpu but the page has no navigator.gpu, we'd be in a
     // mismatched state. Default behaviour: prefer webgpu when
@@ -299,7 +299,7 @@ export class SileroVAD implements VAD {
     this.provider = "wasm";
 
     // Single canonical log line, matching the sibling modules. Format:
-    //   `provider: <actual>` — same string Whisper/Kokoro emit.
+    //   `provider: <actual>` — same string Whisper/Supertonic emit.
     console.log(`provider: ${this.provider}`);
 
     this.speechThreshold = options.speechThreshold ?? DEFAULT_SPEECH_THRESHOLD;
@@ -542,7 +542,7 @@ export class SileroVAD implements VAD {
     this.disposed = true;
 
     // Release the model in the background after pending inferences
-    // drain — fire-and-forget, matches the Whisper/Kokoro pattern.
+    // drain — fire-and-forget, matches the Whisper/Supertonic pattern.
     const modelPromise = this.modelPromise;
     this.modelPromise = null;
     if (modelPromise !== null) {

@@ -7,7 +7,7 @@
  * worklet-node's `port.onmessage` handler the production code
  * registers, and fires synthetic `"frame"` messages to drive the
  * `onFrame` consumer callback without ever running the real worklet
- * JS. The pattern mirrors `KokoroSpeaker.test.ts`'s `AudioContext`
+ * JS. The pattern mirrors `SupertonicSpeaker.test.ts`'s `AudioContext`
  * stub so the two read as siblings.
  *
  * Coverage:
@@ -38,7 +38,7 @@ import {
 import { DECIMATOR_WORKLET_NAME, DECIMATOR_WORKLET_SOURCE } from "./decimator-worklet";
 
 // ────────────────────────────────────────────────────────────────────
-// Web Audio + mic stubs. Mirrors the shape of KokoroSpeaker.test.ts's
+// Web Audio + mic stubs. Mirrors the shape of SupertonicSpeaker.test.ts's
 // installAudioContext() so a reader familiar with that file lands
 // immediately.
 // ────────────────────────────────────────────────────────────────────

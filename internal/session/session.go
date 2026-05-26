@@ -104,6 +104,10 @@ type Store interface {
 	GetOrCreate(id string) *Session
 	Touch(id string)
 	Append(id string, msg llm.Message)
+	// Clear removes all accumulated conversation history from the
+	// named session while keeping the session alive (LastSeen is
+	// updated). A no-op when id is unknown.
+	Clear(id string)
 }
 
 // sessionIDByteLen is the entropy of a freshly-minted session ID
@@ -258,6 +262,20 @@ func (s *memoryStore) Append(id string, msg llm.Message) {
 	}
 	sess.History = append(sess.History, msg)
 	sess.LastSeen = time.Now()
+}
+
+// Clear removes all accumulated history from the named session and
+// updates LastSeen. A no-op when id is unknown — callers that hold
+// the session cookie can always resolve the session via GetOrCreate
+// first, but Clear is defined to be safe to call on an unknown id so
+// callers do not have to guard it themselves.
+func (s *memoryStore) Clear(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[id]; ok {
+		sess.History = nil
+		sess.LastSeen = time.Now()
+	}
 }
 
 // evictLoop is the background goroutine started by NewMemoryStore.

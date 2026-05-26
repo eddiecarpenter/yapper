@@ -37,7 +37,9 @@ const (
 // in the caller's scope.
 func NewServer(cfg *config.Config, client llm.LLMClient, store session.Store) *http.Server {
 	mux := http.NewServeMux()
-	mux.Handle("/ws", NewWebSocketHandler(cfg, client, store))
+	wsHandler := NewWebSocketHandler(cfg, client, store)
+	mux.Handle("/ws", wsHandler)
+	mux.HandleFunc("/clear", wsHandler.ClearHandler)
 	spa := spaFS()
 	warnIfSPAMissing(spa)
 	mux.Handle("/", newSPAHandler(spa))

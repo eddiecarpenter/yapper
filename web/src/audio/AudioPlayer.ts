@@ -5,7 +5,7 @@
  *
  * ## Why this module exists
  *
- * Kokoro TTS (Feature #14, `KokoroSpeaker`) synthesises 24 kHz Float32
+ * Supertonic TTS (Feature #14, `SupertonicSpeaker`) synthesises 24 kHz Float32
  * audio. The browser's preferred output rate is typically 48 kHz
  * (macOS) or 44.1 kHz (some other platforms). The Web Audio API's
  * built-in resampler handles the rate gap when an `AudioBufferSourceNode`
@@ -13,12 +13,12 @@
  * "raw PCM → device output" path is mostly graph plumbing.
  *
  * `AudioPlayer` is a primitive: it does NOT implement the `Speaker`
- * contract (`KokoroSpeaker` already owns that surface for the dialogue
+ * contract (`SupertonicSpeaker` already owns that surface for the dialogue
  * loop). It exists as a lower-layer building block:
  *
  *   - The Phase 2 barge-in seam in `docs/ARCHITECTURE.md` §10 uses
  *     `cancel()` mid-utterance — modelled here so it can be exercised
- *     in isolation and reused if `KokoroSpeaker` later refactors to
+ *     in isolation and reused if `SupertonicSpeaker` later refactors to
  *     delegate raw-PCM playback rather than constructing its own
  *     audio graph.
  *   - A future SPA shell wiring custom WAV / .ogg playback can use
@@ -38,7 +38,7 @@
  *
  * A `play()` call while another is in flight rejects synchronously
  * with a documented error. This module is a primitive — sequencing
- * utterances is `KokoroSpeaker`'s responsibility (it already
+ * utterances is `SupertonicSpeaker`'s responsibility (it already
  * serialises via its own activeSource pointer + cancel chain).
  * Queueing here would create two competing serialisation
  * machineries and a future debug nightmare.
@@ -92,7 +92,7 @@ export class AudioPlayer {
    * the field directly guarantees the caller is unblocked even if
    * `source.stop()` later throws.
    *
-   * Mirrors the `activeResolver` field on `KokoroSpeaker` so the two
+   * Mirrors the `activeResolver` field on `SupertonicSpeaker` so the two
    * implementations stay aligned.
    */
   private activeResolver: (() => void) | null = null;
@@ -129,7 +129,7 @@ export class AudioPlayer {
    * `source.stop()`).
    *
    * Empty input (zero samples) resolves immediately without
-   * constructing an `AudioContext`, mirroring `KokoroSpeaker.speak()`'s
+   * constructing an `AudioContext`, mirroring `SupertonicSpeaker.speak()`'s
    * empty-text contract — a no-content call is a successful no-op.
    *
    * A concurrent `play()` while another is in flight rejects
@@ -148,7 +148,7 @@ export class AudioPlayer {
     }
 
     // Empty samples → resolve immediately without touching Web Audio.
-    // No AudioContext is constructed; matches KokoroSpeaker's
+    // No AudioContext is constructed; matches SupertonicSpeaker's
     // empty-text contract.
     if (samples.length === 0) {
       return;
@@ -165,7 +165,7 @@ export class AudioPlayer {
     // Mono buffer at the supplied sample rate. The Web Audio API
     // automatically resamples to the context's output rate
     // (typically 48 kHz on macOS) — no explicit resampling needed
-    // here, matching the pattern in `KokoroSpeaker.speak()`.
+    // here, matching the pattern in `SupertonicSpeaker.speak()`.
     const buffer = ctx.createBuffer(1, samples.length, sampleRate);
     // `copyToChannel` is the canonical Web Audio path — it handles
     // the detached-ArrayBuffer / SAB-cloning edge cases the
@@ -202,7 +202,7 @@ export class AudioPlayer {
   /**
    * Cancel the in-flight `play()`. Stops the active source and
    * resolves (not rejects) the outstanding Promise — the semantics
-   * match `KokoroSpeaker.cancel()` so a caller can swap the two
+   * match `SupertonicSpeaker.cancel()` so a caller can swap the two
    * Speakers without rewriting the cancel path.
    *
    * Resolver is invoked BEFORE `source.stop()` so the caller's
@@ -255,7 +255,7 @@ export class AudioPlayer {
 
     // First cancel any in-flight playback so the caller's Promise is
     // unblocked and the source is stopped. Matches the cancel-first
-    // pattern in `KokoroSpeaker.dispose()`.
+    // pattern in `SupertonicSpeaker.dispose()`.
     this.cancel();
 
     if (this.audioContext !== null) {

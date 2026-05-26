@@ -209,10 +209,32 @@ func (c *OpenAILLMClient) buildRequest(ctx context.Context, req CompletionReques
 	if c.BaseURL == "" {
 		return nil, errors.New("openai: base URL is empty")
 	}
-	body, err := json.Marshal(req)
+
+	// For streaming requests, request usage in the final SSE chunk.
+	// OpenAI-compatible providers (including LM Studio) require the
+	// stream_options.include_usage flag — without it the [DONE] chunk
+	// carries no token counts and the t/s metric stays at zero.
+	var body []byte
+	var err error
+	if req.Stream {
+		type streamOptions struct {
+			IncludeUsage bool `json:"include_usage"`
+		}
+		type requestWithStreamOpts struct {
+			CompletionRequest
+			StreamOptions streamOptions `json:"stream_options"`
+		}
+		body, err = json.Marshal(requestWithStreamOpts{
+			CompletionRequest: req,
+			StreamOptions:     streamOptions{IncludeUsage: true},
+		})
+	} else {
+		body, err = json.Marshal(req)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("openai: marshal request: %w", err)
 	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.BaseURL+openAIChatCompletionsPath, bytes.NewReader(body))
 	if err != nil {

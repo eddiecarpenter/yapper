@@ -7,7 +7,7 @@
  *   - provider reporting honesty (KD-1 / R2): actual runtime is
  *     always wasm even when WebGPU is preferred
  *   - lazy model loading + LoadingState observable + load-error
- *     classification (mirroring the Whisper/Kokoro shape)
+ *     classification (mirroring the Whisper/Supertonic shape)
  *   - hysteresis state machine: speech detection requires
  *     minSpeechFrames; silence run of minSilenceFrames fires
  *     onSpeechEnd; pure silence emits nothing; hysteresis counters
@@ -29,7 +29,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // vi.mock must execute before the module under test imports. Use the
-// hoisted-handle pattern that Whisper/Kokoro tests established so the
+// hoisted-handle pattern that Whisper/Supertonic tests established so the
 // per-test `beforeEach` can rewire the mock behaviour.
 const mocks = vi.hoisted(() => {
   return {
@@ -689,7 +689,7 @@ describe("SileroVAD — dispose() lifecycle", () => {
     // chain (inflightTail → modelPromise → release). vi.waitFor
     // polls until the assertion holds, which is more robust than
     // counting microtask cycles by hand — and matches the pattern
-    // the sibling Whisper/Kokoro tests use for the same shape.
+    // the sibling Whisper/Supertonic tests use for the same shape.
     await vi.waitFor(() => {
       expect(model.release).toHaveBeenCalledTimes(1);
     });

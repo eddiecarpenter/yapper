@@ -31,6 +31,13 @@ type CompletionRequest struct {
 	// OpenAI) receive a clean request. Set to false for voice assistants
 	// where thinking tokens add latency with no conversational benefit.
 	EnableThinking *bool `json:"enable_thinking,omitempty"`
+
+	// Stop is an optional list of sequences at which the model should
+	// stop generating. Useful for models that emit special tokens (e.g.
+	// "<turn|>") that signal a new conversational turn. Omitted when
+	// empty so providers that don't support the field receive a clean
+	// request.
+	Stop []string `json:"stop,omitempty"`
 }
 
 // Usage tracks token consumption per completion. The Input / Output

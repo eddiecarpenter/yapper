@@ -13,7 +13,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MicrophoneCapture, TARGET_SAMPLE_RATE_HZ, FRAME_SAMPLE_COUNT } from "./audio";
-import { KokoroSpeaker, type SupertonicVoiceId } from "./tts";
+import {
+  SupertonicSpeaker,
+  type SupertonicVoiceId,
+} from "./tts";
 import { TextSplitterStream } from "./tts/splitter";
 import { WhisperTranscriber, type LoadingState } from "./stt";
 import type { DialogueState } from "./dialogue";
@@ -140,7 +143,7 @@ export function App(): JSX.Element {
 
 /* ── Model preload hook + loading bar ────────────────────────── */
 
-/** Minimal interface shared by WhisperTranscriber and KokoroSpeaker. */
+/** Minimal interface shared by WhisperTranscriber and SupertonicSpeaker. */
 interface Loadable {
   subscribe(listener: (state: LoadingState) => void): () => void;
   getLoadingState(): LoadingState;
@@ -265,8 +268,14 @@ type TurnTiming = {
   ttftMs: number;
   /** Total time from relay request sent to done frame received. */
   llmMs: number;
+  /** Time from first sentence dispatched to first audio playing (pure synthesis latency). */
+  ttfsMs: number;
   /** Total time for TTS synthesis + playback. */
   ttsMs: number;
+  /** Output tokens generated this turn (from LLM usage). */
+  outputTokens: number;
+  /** Output tokens per second — outputTokens / (llmMs / 1000). */
+  tokensPerSec: number;
 };
 
 type HistoryMessage = {
@@ -284,7 +293,8 @@ function PushToTalkLoop({
   whisperModelId: string;
 }): JSX.Element {
   const [transcriber] = useState(() => new WhisperTranscriber(whisperModelId));
-  const [speaker] = useState(() => new KokoroSpeaker());
+  const [speaker] = useState(() => new SupertonicSpeaker());
+  const activeSpeakerRef = useRef<SupertonicSpeaker>(speaker);
   const [mic] = useState(() => new MicrophoneCapture());
 
   const [status, setStatus] = useState<string>("Initialising mic…");
@@ -294,22 +304,24 @@ function PushToTalkLoop({
   const [noThinking, setNoThinking] = useState(true); // thinking off by default
   const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoice, setSelectedVoice] = useState<SpeechSynthesisVoice | null>(null);
-  // Supertonic voice — only visible when ONNX pipeline is loaded.
   const [selectedTTSVoice, setSelectedTTSVoice] = useState<SupertonicVoiceId>(TTS_VOICES[0]!.id);
   const [ttsQuality, setTtsQuality] = useState(5); // num_inference_steps 1–50
-  const [ttsSpeed, setTtsSpeed] = useState(1.0); // 0.8–1.2x
+  const [ttsSpeed, setTtsSpeed] = useState(1.2); // 0.5–2.0x
+  const [firstChunkChars, setFirstChunkChars] = useState(35); // min chars for first sentence
+  const firstChunkCharsRef = useRef(35);
+  const [firstChunkEnabled, setFirstChunkEnabled] = useState(false); // false = fire on any sentence
+  const firstChunkEnabledRef = useRef(false);
 
   // Both models must be ready before the button is enabled.
   const { loadingState: sttState } = useModelLoader(transcriber);
   const { loadingState: ttsState } = useModelLoader(speaker);
   const modelReady = sttState === "ready" && ttsState === "ready";
 
-  // Populate voice list once the speaker is ready (voices may not be
-  // available until after a user gesture or the voiceschanged event).
+  // Populate browser voice list once TTS is ready.
   useEffect(() => {
     if (ttsState !== "ready") return;
     const load = () => {
-      const voices = KokoroSpeaker.getBrowserVoices();
+      const voices = SupertonicSpeaker.getBrowserVoices();
       if (voices.length > 0) {
         setBrowserVoices(voices);
         setSelectedVoice((prev) => prev ?? voices[0] ?? null);
@@ -350,49 +362,63 @@ function PushToTalkLoop({
   // Stable ref to history so stopRecording always reads the latest value
   // without needing it in the useCallback dependency array.
   const historyRef = useRef<HistoryMessage[]>([]);
+  // Incremented by clearHistory() so any in-flight turn's done-frame can
+  // detect that the session was cleared mid-turn and skip restoring stale
+  // context into historyRef.
+  const sessionVersionRef = useRef(0);
 
-  // Keep the speaker's voice in sync with UI selection.
+  // Keep browser-TTS voice in sync with UI selection.
   useEffect(() => {
     speaker.setBrowserVoice(selectedVoice);
   }, [speaker, selectedVoice]);
 
-  // Keep Supertonic voice in sync with the voice selector.
+  // Keep ONNX voice in sync.
   useEffect(() => {
     speaker.setVoice(selectedTTSVoice);
   }, [speaker, selectedTTSVoice]);
 
+  // Quality (inference steps).
   useEffect(() => {
     speaker.setNumInferenceSteps(ttsQuality);
   }, [speaker, ttsQuality]);
+
+  // Speed.
   useEffect(() => {
     speaker.setSpeed(ttsSpeed);
   }, [speaker, ttsSpeed]);
-
   /** Phrases that trigger the voice-clear command (case-insensitive, full utterance). */
   const CLEAR_COMMAND =
     /^(clear( (session|history|chat|conversation|everything))?|reset( (session|history|chat|conversation))?|start (over|a new (session|chat|conversation))|new (chat|session|conversation)|forget (everything|that|it all))\.?[!?]?$/i;
 
   const clearHistory = useCallback(() => {
-    speaker.cancel();
+    activeSpeakerRef.current.cancel();
+    sessionVersionRef.current++; // invalidate any in-flight turn's done-frame
     setHistory([]);
     historyRef.current = [];
     setStatus("Ready — hold button to record");
     setError(null);
-  }, [speaker]);
+    // Clear the server-side session history so the next turn's LLM
+    // request doesn't inherit the old conversation context. The cookie
+    // is HttpOnly so the frontend cannot manage it directly — the
+    // relay owns the session store and exposes this endpoint for it.
+    void fetch("/clear", { method: "POST" }).catch((err: unknown) => {
+      console.warn("[session] /clear failed:", err);
+    });
+  }, []);
 
   const startRecording = useCallback(() => {
     // Cancel any TTS that's currently playing so the user can interrupt.
-    speaker.cancel();
+    activeSpeakerRef.current.cancel();
     // Warm the AudioContext while we're inside a direct user-gesture
     // handler — browsers require this to transition from suspended→running.
     // By the time speak() fires (after STT + LLM), the gesture is gone.
-    speaker.warmAudio();
+    activeSpeakerRef.current.warmAudio();
     framesRef.current = [];
     recordingRef.current = true;
     setRecording(true);
     setStatus("Recording… release to transcribe");
     setError(null);
-  }, [speaker]);
+  }, []);
 
   const stopRecording = useCallback(async () => {
     recordingRef.current = false;
@@ -424,10 +450,11 @@ function PushToTalkLoop({
 
       // ── Clear-session voice command ────────────────────────────
       if (CLEAR_COMMAND.test(text.trim())) {
+        const activeSpeaker = activeSpeakerRef.current;
         setStatus("Speaking…");
-        speaker.warmAudio();
+        activeSpeaker.warmAudio();
         clearHistory();
-        void speaker
+        void activeSpeaker
           .speak("Session cleared.")
           .then(() => {
             setStatus("✅ Done — hold to talk again");
@@ -441,45 +468,55 @@ function PushToTalkLoop({
 
       // ── Step 1 done: add user turn and show it immediately ─────
       const userMsg: HistoryMessage = { role: "user", content: text };
-      setHistory((h) => {
-        const next = [...h, userMsg];
-        historyRef.current = next;
-        return next;
-      });
+      // Update historyRef synchronously so ws.onopen reads the correct
+      // history immediately — never inside a setHistory updater where it
+      // can race with a concurrent clearHistory() call.
+      historyRef.current = [...historyRef.current, userMsg];
+      setHistory(historyRef.current);
 
       // ── Step 2: send to relay and stream the LLM response ──────
       setStatus("Thinking…");
+      // Snapshot the generation so the done-frame can detect a mid-turn clear.
+      const myVersion = sessionVersionRef.current;
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
 
       await new Promise<void>((resolve, reject) => {
+        // Capture the active engine once per turn — ref may change between turns.
+        const activeSpeaker = activeSpeakerRef.current;
         let assistantText = "";
         let llmStart = 0;
         let llmMs = 0;
         let ttftMs = 0;
         let firstToken = true;
+        let outputTokens = 0;
 
         // ── Sentence-streaming TTS ─────────────────────────────────
         // Tokens from the LLM are fed into a TextSplitterStream that
         // detects real sentence boundaries (handling abbreviations,
         // URLs, quotes, etc.).
         //
-        // Dispatch strategy — two-threshold to minimise first-word
-        // latency while keeping mid-response chunks large enough for
-        // good prosody:
-        //   • First chunk: dispatch as soon as the very first complete
-        //     sentence arrives, regardless of length. This makes TTS
-        //     start speaking immediately after the first LLM sentence
-        //     rather than waiting for 100 chars to accumulate.
-        //   • Subsequent chunks: merge sentences until ≥ 40 chars so
-        //     the model isn't called with tiny two-word fragments.
-        const splitter = new TextSplitterStream();
-        let mergeBuffer = ""; // complete sentences waiting to merge
-        const MIN_CHUNK_CHARS = 40; // minimum for 2nd+ chunks
+        // Dispatch strategy:
+        //   • First chunk: accumulate complete sentences until their
+        //     combined length >= FIRST_CHUNK_CHARS, then dispatch.
+        //     Waiting for a full sentence (rather than cutting at a
+        //     word boundary) ensures the first audio chunk is long
+        //     enough that ONNX synthesis of chunk 2 completes before
+        //     chunk 1 finishes playing — eliminating the audible gap.
+        //   • Subsequent chunks: each complete sentence dispatches
+        //     immediately. Synthesis starts in parallel so by the time
+        //     the previous chunk ends, the next is ready to play.
+        let splitter = new TextSplitterStream();
+        let mergeBuffer = ""; // complete sentences accumulating toward first dispatch
+        // FIRST_CHUNK_CHARS: minimum combined sentence length before first dispatch.
+        // When disabled, any complete sentence fires immediately.
+        const FIRST_CHUNK_CHARS = firstChunkEnabledRef.current ? firstChunkCharsRef.current : 0;
         let firstChunkDispatched = false;
         let ttsChain = Promise.resolve() as Promise<void>;
         let ttsStartMs = 0;
         let ttsStarted = false;
+        let ttfsMs = 0; // time-to-first-sound: ms from first dispatch to first audio playing
+        let firstSoundPlayed = false;
 
         const enqueueChunk = (chunk: string) => {
           const s = chunk.trim();
@@ -487,12 +524,32 @@ function PushToTalkLoop({
           if (!ttsStarted) {
             ttsStarted = true;
             ttsStartMs = performance.now();
-            setStatus("Speaking…");
+            // Clear the abort flag that cancel() set in startRecording().
+            // Without this, synthesize() discards its result (returns null),
+            // falls back to speak() which re-queues synthesis behind all the
+            // other enqueueChunk calls, so audio only starts after everything
+            // is synthesised — which looks like "message appears, then audio".
+            activeSpeaker.beginTurn();
+            setStatus("Preparing voice…");
           }
+          // Kick off synthesis immediately — it runs in parallel with the
+          // current chunk's playback so there's no synthesis gap between chunks.
+          const synthPromise = activeSpeaker.synthesize(s);
           ttsChain = ttsChain
-            .then(() => {
+            .then(async () => {
               if (recordingRef.current) return;
-              return speaker.speak(s);
+              const data = await synthPromise;
+              if (!firstSoundPlayed) {
+                firstSoundPlayed = true;
+                ttfsMs = Math.round(performance.now() - ttsStartMs);
+                setStatus("Speaking…");
+              }
+              if (data === null) {
+                // ONNX synthesis skipped (browser TTS fallback or abort) —
+                // fall back to the blocking speak() path.
+                return activeSpeaker.speak(s);
+              }
+              return activeSpeaker.playAudioData(data);
             })
             .catch((ttsErr: unknown) => {
               const msg = ttsErr instanceof Error ? ttsErr.message : String(ttsErr);
@@ -501,30 +558,51 @@ function PushToTalkLoop({
             });
         };
 
-        // Drain completed sentences from the splitter into mergeBuffer,
-        // then dispatch: immediately on the first sentence, or once
-        // ≥ MIN_CHUNK_CHARS have accumulated for subsequent chunks.
+        // Drain completed sentences from the splitter and dispatch them.
+        //
+        // First-chunk rule: accumulate complete sentences until the buffer
+        // reaches FIRST_CHUNK_CHARS. This ensures the first audio chunk is
+        // long enough that ONNX synthesis of the second chunk completes
+        // before the first chunk finishes playing — eliminating the audible
+        // gap that occurs when a short first chunk (word-boundary cut) ends
+        // before the next synthesis is ready.
+        //
+        //   • No sentence yet → wait.
+        //   • Sentence(s) accumulated but < FIRST_CHUNK_CHARS → wait (merge).
+        //   • Sentence(s) >= FIRST_CHUNK_CHARS → dispatch immediately.
+        //   • forceAll (stream ended) → dispatch whatever is left.
+        //
+        // No word-boundary cuts during streaming — they produce chunks that
+        // are too short, causing audible pauses between the first and second
+        // chunks while ONNX finishes the second synthesis.
+        //
+        // Subsequent chunks: each complete sentence dispatches immediately.
+        // splitter.flush() (called externally before forceAll) moves any
+        // partial remainder into splitter.sentences, so the same loop
+        // handles both mid-stream and end-of-stream cases.
         const flushBuffer = (forceAll = false) => {
-          // Pull any newly completed sentences out of the splitter.
-          while (splitter.sentences.length > 0) {
-            const s = splitter.sentences.shift()!;
-            mergeBuffer += (mergeBuffer ? " " : "") + s;
-          }
-          // First chunk: fire as soon as any sentence is ready.
-          if (!firstChunkDispatched && mergeBuffer.trim()) {
+          if (!firstChunkDispatched) {
+            // Accumulate complete sentences into mergeBuffer.
+            while (splitter.sentences.length > 0) {
+              const s = splitter.sentences.shift()!;
+              mergeBuffer += (mergeBuffer ? " " : "") + s;
+            }
+
+            if (!mergeBuffer.trim()) return; // no sentence yet
+            // Wait until merged sentences are long enough for good overlap,
+            // unless the stream has ended (forceAll).
+            if (!forceAll && mergeBuffer.length < FIRST_CHUNK_CHARS) return;
+
             firstChunkDispatched = true;
             enqueueChunk(mergeBuffer);
             mergeBuffer = "";
             return;
           }
-          // Subsequent chunks: accumulate to MIN_CHUNK_CHARS for prosody.
-          while (mergeBuffer.length >= MIN_CHUNK_CHARS) {
-            enqueueChunk(mergeBuffer);
-            mergeBuffer = "";
-          }
-          if (forceAll && mergeBuffer.trim()) {
-            enqueueChunk(mergeBuffer);
-            mergeBuffer = "";
+
+          // Subsequent chunks: dispatch each complete sentence immediately.
+          while (splitter.sentences.length > 0) {
+            const s = splitter.sentences.shift()!;
+            if (s.trim()) enqueueChunk(s.trim());
           }
         };
         // ──────────────────────────────────────────────────────────
@@ -544,7 +622,7 @@ function PushToTalkLoop({
         };
 
         ws.onmessage = (ev: MessageEvent<string>) => {
-          let frame: { type: string; text?: string; message?: string };
+          let frame: { type: string; text?: string; message?: string; usage?: { input: number; output: number } };
           try {
             frame = JSON.parse(ev.data) as typeof frame;
           } catch {
@@ -552,6 +630,9 @@ function PushToTalkLoop({
           }
 
           if (frame.type === "token" && typeof frame.text === "string") {
+            // If the user cleared the session mid-turn, discard tokens so
+            // stale assistant text doesn't re-appear in the cleared history.
+            if (sessionVersionRef.current !== myVersion) return;
             if (firstToken) {
               ttftMs = Math.round(performance.now() - llmStart);
               firstToken = false;
@@ -560,6 +641,8 @@ function PushToTalkLoop({
             splitter.push(frame.text);
             flushBuffer();
             // Update the assistant placeholder in-place while streaming.
+            // NOTE: historyRef is NOT updated here — it only tracks the
+            // turn-complete state. The streaming display is pure React state.
             setHistory((h) => {
               const rest = h.filter((m) => m.role !== "assistant" || m.content !== "");
               const prev = rest.at(-1);
@@ -571,28 +654,42 @@ function PushToTalkLoop({
             if (!ttsStarted) setStatus("Streaming…");
           } else if (frame.type === "done") {
             llmMs = Math.round(performance.now() - llmStart);
+            outputTokens = frame.usage?.output ?? 0;
             // Flush the splitter (handles any text without a terminator),
             // then force-dispatch the remaining merge buffer.
             splitter.flush();
             flushBuffer(true);
-            // Finalise history without timing — TTS chain is still running.
-            setHistory((h) => {
-              const updated = h.filter((m) => !(m.role === "assistant" && m.content === ""));
-              historyRef.current = updated;
-              return updated;
-            });
+            // Commit the completed assistant turn to historyRef so the NEXT
+            // turn's ws.onopen sends the full conversation context to the LLM.
+            // Guard with the generation counter: if clearHistory() fired
+            // mid-turn (sessionVersionRef was incremented), skip this — the
+            // session has already been wiped and we must not restore it.
+            if (sessionVersionRef.current === myVersion) {
+              historyRef.current = [
+                ...historyRef.current,
+                { role: "assistant", content: assistantText },
+              ];
+              setHistory(historyRef.current);
+            }
             ws.close();
             // Wait for the full TTS chain to drain, then stamp timing.
+            // NOTE: do NOT write historyRef.current here. This callback fires
+            // after cancel() resolves the chain (e.g. when the user says
+            // "clear"), and at that point the old React state may not yet
+            // have been replaced by setHistory([]) — so writing historyRef
+            // here would silently restore the cleared context. Timing is
+            // display-only; the LLM never sees it.
             ttsChain
               .then(() => {
                 const ttsMs = ttsStarted ? Math.round(performance.now() - ttsStartMs) : 0;
-                const timing: TurnTiming = { sttMs, ttftMs, llmMs, ttsMs };
+                const tokensPerSec = outputTokens > 0 && llmMs > 0
+                  ? Math.round(outputTokens / (llmMs / 1000))
+                  : 0;
+                const timing: TurnTiming = { sttMs, ttftMs, llmMs, ttfsMs, ttsMs, outputTokens, tokensPerSec };
                 setHistory((h) => {
-                  const updated = h.map((m, i, arr) =>
+                  return h.map((m, i, arr) =>
                     i === arr.length - 1 && m.role === "assistant" ? { ...m, timing } : m,
                   );
-                  historyRef.current = updated;
-                  return updated;
                 });
                 setStatus("✅ Done — hold to talk again");
               })
@@ -633,7 +730,7 @@ function PushToTalkLoop({
       {/* Loading bars — one per model */}
       <ModelLoader model={transcriber} label="Speech recognition" />
       <ModelLoader model={speaker} label="Voice synthesis" />
-      {/* Supertonic controls — shown when ONNX pipeline is loaded. */}
+      {/* TTS controls */}
       {ttsState === "ready" && speaker.getProvider() !== "browser" && (
         <div
           style={{
@@ -672,8 +769,10 @@ function PushToTalkLoop({
               onChange={(e) => setTtsQuality(parseInt(e.target.value))}
               style={{ width: "120px", accentColor: "#007aff" }}
             />
-            <span style={{ color: "#555", minWidth: "3rem" }}>{ttsQuality} steps</span>
-            <span style={{ color: "#aaa", fontSize: "0.78rem" }}>higher = slower, better</span>
+            <span style={{ color: "#555", minWidth: "3rem" }}>{ttsQuality} step{ttsQuality !== 1 ? "s" : ""}</span>
+            <span style={{ color: ttsQuality === 1 ? "#2a9d2a" : ttsQuality <= 5 ? "#aaa" : "#c00", fontSize: "0.78rem" }}>
+              {ttsQuality === 1 ? "⚡ fastest — best for conversation" : ttsQuality <= 5 ? `~${ttsQuality}× slower` : `~${ttsQuality}× slower — noticeable delay`}
+            </span>
           </div>
 
           {/* Speed */}
@@ -689,6 +788,41 @@ function PushToTalkLoop({
               style={{ width: "120px", accentColor: "#007aff" }}
             />
             <span style={{ color: "#555", minWidth: "3rem" }}>{ttsSpeed.toFixed(2)}×</span>
+          </div>
+
+          {/* First-chunk threshold */}
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span style={{ minWidth: "4.5rem", fontWeight: 600 }}>Trigger:</span>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.3rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={firstChunkEnabled}
+                onChange={(e) => {
+                  const v = e.target.checked;
+                  setFirstChunkEnabled(v);
+                  firstChunkEnabledRef.current = v;
+                }}
+              />
+              <span style={{ fontSize: "0.85rem", color: "#555" }}>enabled</span>
+            </label>
+            <input
+              type="range"
+              min={10}
+              max={200}
+              step={5}
+              disabled={!firstChunkEnabled}
+              value={firstChunkChars}
+              onChange={(e) => {
+                const v = parseInt(e.target.value);
+                setFirstChunkChars(v);
+                firstChunkCharsRef.current = v;
+              }}
+              style={{ width: "120px", accentColor: "#007aff", opacity: firstChunkEnabled ? 1 : 0.35 }}
+            />
+            <span style={{ color: firstChunkEnabled ? "#555" : "#aaa", minWidth: "3rem" }}>
+              {firstChunkEnabled ? `${firstChunkChars} ch` : "off"}
+            </span>
+            <span style={{ color: "#aaa", fontSize: "0.78rem" }}>min chars for first sentence</span>
           </div>
         </div>
       )}
@@ -797,9 +931,9 @@ function PushToTalkLoop({
       <Transcript
         history={history}
         onReplay={(text) => {
-          speaker.cancel();
-          speaker.warmAudio();
-          void speaker.speak(text).catch((err: unknown) => {
+          activeSpeakerRef.current.cancel();
+          activeSpeakerRef.current.warmAudio();
+          void activeSpeakerRef.current.speak(text).catch((err: unknown) => {
             setError(`TTS error: ${err instanceof Error ? err.message : String(err)}`);
           });
         }}
@@ -813,7 +947,7 @@ function PushToTalkLoop({
 function VoiceLoop({ onStop }: { onStop: () => void }): JSX.Element {
   const [deps] = useState(() => ({
     transcriber: new WhisperTranscriber(),
-    speaker: new KokoroSpeaker(),
+    speaker: new SupertonicSpeaker(),
     vad: new SileroVAD(),
   }));
   const [pipelineState, setPipelineState] = useState<PipelineState>("idle");
@@ -925,10 +1059,9 @@ function Transcript({
                 fontVariantNumeric: "tabular-nums",
               }}
             >
-              <span title="Speech-to-text">🎙 {m.timing.sttMs} ms</span>
-              <span title="Time to first token">⚡ {m.timing.ttftMs} ms</span>
-              <span title="Total LLM time">🤖 {m.timing.llmMs} ms</span>
-              <span title="TTS synthesis + playback">🔊 {m.timing.ttsMs} ms</span>
+              <span title="Speech-to-text (Whisper)">🎙 {m.timing.sttMs} ms</span>
+              <span title="Time to first token (LLM)">⚡ {m.timing.ttftMs} ms</span>
+              <span title="Time to first sound (TTS synthesis)">🔉 {m.timing.ttfsMs} ms</span>
             </span>
           )}
         </li>

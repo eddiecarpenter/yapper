@@ -40,7 +40,7 @@ import type { VAD } from "../vad/types";
 
 /**
  * Observable lifecycle states the pipeline transitions through. The
- * shape matches `LoadingState` on the sibling Whisper / Kokoro
+ * shape matches `LoadingState` on the sibling Whisper / Supertonic
  * modules in spirit (single-string enum + observable) but uses
  * pipeline-specific names because the meaning differs:
  *

@@ -1,9 +1,9 @@
 /**
- * Unit tests for `KokoroSpeaker`.
+ * Unit tests for `SupertonicSpeaker`.
  *
  * Coverage layers across the feature's four tasks:
  *   - Task 1: backend-selection branches and the canonical
- *     provider log line. Does not touch the Kokoro pipeline.
+ *     provider log line. Does not touch the Supertonic pipeline.
  *   - Task 2: lazy model loading + loading-state observable +
  *     load-error classification. The Transformers.js `pipeline`
  *     factory is mocked at the module boundary via `vi.mock` so
@@ -44,11 +44,11 @@ vi.mock("@huggingface/transformers", () => ({
 
 import {
   DEFAULT_VOICE,
-  KOKORO_MODEL_ID,
-  KokoroSpeaker,
+  SUPERTONIC_MODEL_ID,
+  SupertonicSpeaker,
   extractSynthesisOutput,
-} from "./KokoroSpeaker";
-import type { LoadingState } from "./KokoroSpeaker";
+} from "./SupertonicSpeaker";
+import type { LoadingState } from "./SupertonicSpeaker";
 
 /**
  * `navigator.gpu` is not declared on the default DOM lib's `Navigator`
@@ -223,7 +223,7 @@ function stubFetch(): void {
   );
 }
 
-describe("KokoroSpeaker — backend selection", () => {
+describe("SupertonicSpeaker — backend selection", () => {
   let logSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -247,7 +247,7 @@ describe("KokoroSpeaker — backend selection", () => {
   it("selects wasm and logs 'provider: wasm' when navigator.gpu is undefined", () => {
     // jsdom's navigator has no `gpu`; this is the default state — the
     // delete in afterEach guarantees no prior test polluted it.
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
 
     expect(s.getProvider()).toBe("wasm");
     expect(logSpy).toHaveBeenCalledTimes(1);
@@ -256,7 +256,7 @@ describe("KokoroSpeaker — backend selection", () => {
 
   it("does not throw when navigator.gpu is undefined (WASM fallback is supported)", () => {
     // AC-4 explicitly says "no error thrown" on the WASM path.
-    expect(() => new KokoroSpeaker()).not.toThrow();
+    expect(() => new SupertonicSpeaker()).not.toThrow();
   });
 
   it("selects webgpu and logs 'provider: webgpu' when navigator.gpu is present", () => {
@@ -264,7 +264,7 @@ describe("KokoroSpeaker — backend selection", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (navigator as any).gpu = GPU_SENTINEL;
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
 
     expect(s.getProvider()).toBe("webgpu");
     expect(logSpy).toHaveBeenCalledTimes(1);
@@ -275,10 +275,10 @@ describe("KokoroSpeaker — backend selection", () => {
     // Two instances → two log lines, never more. Catches a future
     // refactor that accidentally calls the logger from getProvider()
     // or some other accessor.
-    new KokoroSpeaker();
+    new SupertonicSpeaker();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (navigator as any).gpu = GPU_SENTINEL;
-    new KokoroSpeaker();
+    new SupertonicSpeaker();
 
     expect(logSpy).toHaveBeenCalledTimes(2);
     expect(logSpy).toHaveBeenNthCalledWith(1, "provider: wasm");
@@ -286,13 +286,13 @@ describe("KokoroSpeaker — backend selection", () => {
   });
 
   it("cancel() and dispose() Task-1/2/3 stubs do not throw", () => {
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     expect(() => s.cancel()).not.toThrow();
     expect(() => s.dispose()).not.toThrow();
   });
 });
 
-describe("KokoroSpeaker — lazy model loading + state observable", () => {
+describe("SupertonicSpeaker — lazy model loading + state observable", () => {
   beforeEach(() => {
     // Silence the provider log; this block does not assert on it.
     vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -305,7 +305,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
   });
 
   it("starts in the 'idle' state with no pipeline construction attempted", () => {
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
 
     expect(s.getLoadingState()).toBe("idle");
     // The constructor must NOT touch the pipeline factory — that is the
@@ -317,7 +317,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const seen: LoadingState[] = [];
     s.subscribe((st) => seen.push(st));
 
@@ -327,18 +327,18 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     expect(s.getLoadingState()).toBe("ready");
   });
 
-  it("calls pipeline(...) with the canonical Kokoro model id and the selected device", async () => {
+  it("calls pipeline(...) with the canonical Supertonic model id and the selected device", async () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("hi");
 
     // Argument tuple matches the Transformers.js pipeline signature:
     // (task, modelId, options) — verifying it pins both AD-10 (the
     // model) and the wiring of provider → device option.
     expect(mocks.pipeline).toHaveBeenCalledTimes(1);
-    expect(mocks.pipeline).toHaveBeenCalledWith("text-to-speech", KOKORO_MODEL_ID, {
+    expect(mocks.pipeline).toHaveBeenCalledWith("text-to-speech", SUPERTONIC_MODEL_ID, {
       device: "wasm",
     });
   });
@@ -347,7 +347,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("a");
     const stateAfterFirst = s.getLoadingState();
     const seen: LoadingState[] = [];
@@ -376,7 +376,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
       }),
     );
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const a = s.speak("first");
     const b = s.speak("second");
 
@@ -390,7 +390,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const seen: LoadingState[] = [];
     const unsubscribe = s.subscribe((st) => seen.push(st));
 
@@ -404,7 +404,7 @@ describe("KokoroSpeaker — lazy model loading + state observable", () => {
   });
 });
 
-describe("KokoroSpeaker — load error classification", () => {
+describe("SupertonicSpeaker — load error classification", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     mocks.pipeline.mockReset();
@@ -418,7 +418,7 @@ describe("KokoroSpeaker — load error classification", () => {
   it("transitions to 'error' and rejects when the pipeline factory rejects", async () => {
     mocks.pipeline.mockRejectedValue(new Error("boom"));
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const seen: LoadingState[] = [];
     s.subscribe((st) => seen.push(st));
 
@@ -435,7 +435,7 @@ describe("KokoroSpeaker — load error classification", () => {
     quotaErr.name = "QuotaExceededError";
     mocks.pipeline.mockRejectedValue(quotaErr);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
 
     await expect(s.speak("hi")).rejects.toThrow(/storage quota exceeded/);
   });
@@ -444,7 +444,7 @@ describe("KokoroSpeaker — load error classification", () => {
     const netErr = new TypeError("Failed to fetch");
     mocks.pipeline.mockRejectedValue(netErr);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
 
     await expect(s.speak("hi")).rejects.toThrow(/network unreachable/);
   });
@@ -452,7 +452,7 @@ describe("KokoroSpeaker — load error classification", () => {
   it("falls back to 'unknown' classification and surfaces the original message", async () => {
     mocks.pipeline.mockRejectedValue(new Error("some weird onnxruntime error"));
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
 
     await expect(s.speak("hi")).rejects.toThrow(/some weird onnxruntime error/);
   });
@@ -463,7 +463,7 @@ describe("KokoroSpeaker — load error classification", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValueOnce(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await expect(s.speak("hi")).rejects.toThrow(/Failed to load TTS model/);
     await s.speak("hi");
 
@@ -475,7 +475,7 @@ describe("KokoroSpeaker — load error classification", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const seen: LoadingState[] = [];
     s.subscribe(() => {
       throw new Error("buggy listener");
@@ -495,7 +495,7 @@ describe("KokoroSpeaker — load error classification", () => {
 // Task 3 — speak() synthesis + Web Audio playback + voice option
 // ────────────────────────────────────────────────────────────────────
 
-describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)", () => {
+describe("SupertonicSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)", () => {
   let audioState: FakeContextState;
 
   beforeEach(() => {
@@ -512,7 +512,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
   it("resolves immediately on empty input, does not invoke pipeline or construct AudioContext", async () => {
     mocks.pipeline.mockResolvedValue(makeFakePipeline().pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("");
 
     expect(mocks.pipeline).not.toHaveBeenCalled();
@@ -522,18 +522,18 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
   it("resolves immediately on whitespace-only input — same no-op contract", async () => {
     mocks.pipeline.mockResolvedValue(makeFakePipeline().pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("   \n\t  ");
 
     expect(mocks.pipeline).not.toHaveBeenCalled();
     expect(audioState.contexts).toHaveLength(0);
   });
 
-  it("invokes the Kokoro pipeline with the default voice when no override is supplied", async () => {
+  it("invokes the Supertonic pipeline with the default voice when no override is supplied", async () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("hello world");
 
     expect(fake.calls).toHaveLength(1);
@@ -548,11 +548,11 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     expect(s.getVoice()).toBe(DEFAULT_VOICE);
   });
 
-  it("invokes the Kokoro pipeline with a constructor-supplied voice override", async () => {
+  it("invokes the Supertonic pipeline with a constructor-supplied voice override", async () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker({ voice: "af_heart" });
+    const s = new SupertonicSpeaker({ voice: "af_heart" });
     await s.speak("hello");
 
     // The constructor voice is stored and returned by getVoice();
@@ -577,7 +577,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const fake = makeFakePipeline({ audio: fixtureAudio, sampling_rate: 24000 });
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("non-empty");
 
     expect(audioState.buffers).toHaveLength(1);
@@ -595,7 +595,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("hi");
 
     expect(audioState.sources).toHaveLength(1);
@@ -614,7 +614,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const speakPromise = s.speak("hi");
 
     let resolved = false;
@@ -663,7 +663,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const shortAudio = makeNonSilent(shortText.length * samplesPerChar);
     const fake1 = makeFakePipeline({ audio: shortAudio, sampling_rate: sampleRate });
     mocks.pipeline.mockResolvedValue(fake1.pipeline);
-    const s1 = new KokoroSpeaker();
+    const s1 = new SupertonicSpeaker();
     await s1.speak(shortText);
     const shortBuffer = audioState.buffers.at(-1)!;
     expect(shortBuffer.length).toBe(shortAudio.length + silenceSamples);
@@ -678,7 +678,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const longAudio = makeNonSilent(longText.length * samplesPerChar);
     const fake2 = makeFakePipeline({ audio: longAudio, sampling_rate: sampleRate });
     mocks.pipeline.mockResolvedValue(fake2.pipeline);
-    const s2 = new KokoroSpeaker();
+    const s2 = new SupertonicSpeaker();
     await s2.speak(longText);
     const longBuffer = audioState.buffers.at(-1)!;
     expect(longBuffer.length).toBe(longAudio.length + silenceSamples);
@@ -699,7 +699,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("first");
     await s.speak("second");
     expect(mocks.pipeline).toHaveBeenCalledTimes(1);
@@ -712,7 +712,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     expect(audioState.contexts).toHaveLength(0);
     await s.speak("hi");
     expect(audioState.contexts).toHaveLength(1);
@@ -725,7 +725,7 @@ describe("KokoroSpeaker — speak() synthesis + Web Audio playback (AC-1, AC-3)"
     const malformed = makeFakePipeline({ unexpected: "shape" } as unknown);
     mocks.pipeline.mockResolvedValue(malformed.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await expect(s.speak("hi")).rejects.toThrow(/unexpected.*audio.*shape/);
   });
 });
@@ -770,7 +770,7 @@ describe("extractSynthesisOutput — output parser", () => {
 // Task 4 — cancel() coordination + dispose() lifecycle (AC-2)
 // ────────────────────────────────────────────────────────────────────
 
-describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
+describe("SupertonicSpeaker — cancel() coordination (AC-2)", () => {
   let audioState: FakeContextState;
 
   beforeEach(() => {
@@ -791,7 +791,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const speakPromise = s.speak("hi");
 
     // Wait until the source has been constructed (load + fetch + synthesis settled).
@@ -813,7 +813,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     // First call: cancel during playback.
     audioState.autoEnd = false;
     const first = s.speak("a");
@@ -847,7 +847,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     );
     mocks.pipeline.mockResolvedValue(synthCallable as unknown);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const speakPromise = s.speak("hi");
 
     // Wait until the synthesis call has been issued (load + fetch settled).
@@ -885,7 +885,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     });
     mocks.pipeline.mockResolvedValue(callable as unknown);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const first = s.speak("a");
     await vi.waitFor(() => {
       expect(callable).toHaveBeenCalledTimes(1);
@@ -902,7 +902,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
   });
 
   it("cancel() with no active speak() is a safe no-op (no throw)", () => {
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     expect(() => s.cancel()).not.toThrow();
     expect(() => s.cancel()).not.toThrow(); // double-cancel also safe
   });
@@ -911,7 +911,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     s.cancel(); // pre-speak cancel
     await s.speak("hi");
 
@@ -926,7 +926,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const speakPromise = s.speak("hi");
     await vi.waitFor(() => {
       expect(audioState.sources).toHaveLength(1);
@@ -949,7 +949,7 @@ describe("KokoroSpeaker — cancel() coordination (AC-2)", () => {
   });
 });
 
-describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
+describe("SupertonicSpeaker — dispose() lifecycle (AC-2)", () => {
   let audioState: FakeContextState;
 
   beforeEach(() => {
@@ -964,7 +964,7 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
   });
 
   it("dispose() before any speak() is a safe no-op (state stays 'idle')", () => {
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
 
     expect(() => s.dispose()).not.toThrow();
     expect(s.getLoadingState()).toBe("idle");
@@ -975,7 +975,7 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("hi");
     expect(s.getLoadingState()).toBe("ready");
     expect(audioState.contexts).toHaveLength(1);
@@ -996,7 +996,7 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const speakPromise = s.speak("hi");
     await vi.waitFor(() => {
       expect(audioState.sources).toHaveLength(1);
@@ -1018,7 +1018,7 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     const seen: LoadingState[] = [];
     s.subscribe((st) => seen.push(st));
 
@@ -1040,7 +1040,7 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
     const fake = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("hi");
     s.dispose();
     expect(() => s.dispose()).not.toThrow();
@@ -1053,7 +1053,7 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
   });
 
   it("dispose() with nothing active (no load, no playback): safe no-op", () => {
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     // No speak ever called.
     expect(() => s.dispose()).not.toThrow();
     // No context was constructed (lazy AudioContext was never created).
@@ -1069,7 +1069,7 @@ describe("KokoroSpeaker — dispose() lifecycle (AC-2)", () => {
     const fake1 = makeFakePipeline();
     mocks.pipeline.mockResolvedValue(fake1.pipeline);
 
-    const s = new KokoroSpeaker();
+    const s = new SupertonicSpeaker();
     await s.speak("first");
     s.dispose();
     expect(audioState.contexts).toHaveLength(1);

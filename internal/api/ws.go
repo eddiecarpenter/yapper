@@ -266,6 +266,7 @@ func (h *WebSocketHandler) handleTurn(ctx context.Context, conn *websocket.Conn,
 		Model:          h.cfg.LLM.Model,
 		Messages:       buildMessages(h.cfg.LLM.SystemPrompt, sess.History, inbound.Text),
 		EnableThinking: &enableThinking,
+		Stop:           h.cfg.LLM.StopSequences,
 	}
 
 	// thinkFilter strips Qwen3-style <think>…</think> reasoning blocks
@@ -312,6 +313,25 @@ func (h *WebSocketHandler) handleTurn(ctx context.Context, conn *websocket.Conn,
 	}
 	_ = wsjson.Write(ctx, conn, doneFrame{Type: doneFrameType, Usage: usage})
 	return nil
+}
+
+// ClearHandler handles POST /clear — wipes the server-side
+// conversation history for the current session so the next turn
+// starts with an empty context. The session is identified by the
+// yapper_session cookie; if the cookie is absent a new empty session
+// is minted (and its Set-Cookie header returned) so the response is
+// always a 204 and the subsequent /ws turn sees no history.
+func (h *WebSocketHandler) ClearHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sess, setCookie := h.resolve(r)
+	if setCookie != nil {
+		http.SetCookie(w, setCookie)
+	}
+	h.store.Clear(sess.ID)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // buildMessages composes the message list sent to the LLM: optional

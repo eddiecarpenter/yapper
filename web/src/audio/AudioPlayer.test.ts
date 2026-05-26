@@ -8,7 +8,7 @@
  * by hand; the test that exercises mid-playback `cancel()` overrides
  * `autoEnd` so the test controls when `onended` runs.
  *
- * Pattern is copied from `KokoroSpeaker.test.ts`'s
+ * Pattern is copied from `SupertonicSpeaker.test.ts`'s
  * `installAudioContext` so the two stubs read as siblings — a
  * future reader who has read one can navigate the other.
  *
@@ -34,7 +34,7 @@ import { AudioPlayer, AudioPlayerBusyError } from "./AudioPlayer";
 
 // ────────────────────────────────────────────────────────────────────
 // AudioContext / AudioBufferSourceNode / AudioBuffer stubs.
-// Adapted from KokoroSpeaker.test.ts so the two share a layout.
+// Adapted from SupertonicSpeaker.test.ts so the two share a layout.
 // ────────────────────────────────────────────────────────────────────
 
 type FakeSource = {
